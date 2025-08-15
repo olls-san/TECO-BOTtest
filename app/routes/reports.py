@@ -126,11 +126,18 @@ def reporte_ventas(
             reverse=True,
         )[:5]
 
+    # Calcular agregados
+    total_ventas = sum(item.get("total_ventas", 0) for item in resumen)
+    total_cantidad = sum(item.get("cantidad_vendida", 0) for item in resumen)    
+    total_stock = sum(item.get("stock_actual", 0) for item in resumen)
+
+    # Actualiza el diccionario resumen_agregado
     resumen_agregado = {
-        "total_recaudado": round(total_ventas, 2),
-        "total_items_vendidos": round(total_cantidad, 2),
-        "numero_productos_distintos": len(resumen),
-        "top_5_productos": top_5,
+        "total_ventas": round(total_ventas, 2),           # Monto total de ventas
+        "cantidad_items_vendidos": round(total_cantidad, 2),   # Suma de unidades vendidas
+        "cantidad_productos_vendidos": len(resumen),      # Número de productos distintos con ventas
+        "stock_actual_total": round(total_stock, 2),       # Stock acumulado de todos los productos
+        "top_5_productos": top_5,                          # Sigue mostrando el top 5, si lo deseas
     }
 
     # Si se solicita formato de archivo, generar CSV o Excel
