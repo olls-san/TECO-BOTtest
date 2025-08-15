@@ -43,15 +43,26 @@ if not logger.handlers:
 
 
 @router.post("/reporte-ventas")
-def reporte_ventas(data: models.ReporteVentasRequest):
-    """Generate a sales report for a date range."""
+def reporte_ventas(
+    data: models.ReporteVentasRequest,
+    formato: str | None = Query(
+        None,
+        description="Formato opcional del reporte (csv o excel) para descargar el detalle completo",
+    ),
+):
+    """Genera un reporte de ventas entre dos fechas con resumen y exportación opcional."""
+    # Validación y contexto de autenticación
     ctx = user_context.get(data.usuario)
     if not ctx:
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+
+    # Construir rango de fechas con horas para extremos del día
     fecha_inicio = datetime.combine(data.fecha_inicio.date(), time(0, 1))
     fecha_fin = datetime.combine(data.fecha_fin.date(), time(23, 59))
+
+    # Llamada a la API de Tecopos
     url = f"{base_url}/api/v1/report/selled-products"
     params = {
         "dateFrom": fecha_inicio.strftime("%Y-%m-%d %H:%M"),
@@ -62,23 +73,103 @@ def reporte_ventas(data: models.ReporteVentasRequest):
     if res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudo obtener el reporte de ventas")
     productos_raw = res.json().get("products", [])
+
+    # Transformar la respuesta en una lista de productos con ventas detalladas
     resumen: List[Dict[str, object]] = []
     for p in productos_raw:
         for venta in p.get("totalSales", []):
             resumen.append({
                 "productId": p["productId"],
                 "nombre": p["name"],
-                "cantidad_vendida": p["quantitySales"],
-                "total_ventas": venta["amount"],
-                "moneda": venta["codeCurrency"],
-                "unidad": p["measure"],
-                "categoria": p["productCategory"],
-                "area_venta": p["areaSales"],
+                "cantidad_vendida": p.get("quantitySales", 0),
+                "total_ventas": venta.get("amount", 0),
+                "moneda": venta.get("codeCurrency"),
+                "unidad": p.get("measure"),
+                "categoria": p.get("productCategory"),
+                "area_venta": p.get("areaSales"),
                 "stock_actual": float(p.get("totalQuantity", 0)),
             })
+
+    # Si no hay productos, devolver mensaje vacío
+    if not resumen:
+        return {
+            "status": "ok",
+            "mensaje": f"No se encontraron ventas entre {fecha_inicio.date()} y {fecha_fin.date()}",
+            "resumen": {},
+            "productos": [],
+        }
+
+    # Calcular métricas agregadas para el resumen
+    total_ventas = sum(item.get("total_ventas", 0) for item in resumen)
+    total_cantidad = sum(item.get("cantidad_vendida", 0) for item in resumen)
+    try:
+        import pandas as pd  # se usa para ordenar y exportar
+        df = pd.DataFrame(resumen)
+        top_5 = (
+            df.sort_values(by="total_ventas", ascending=False)
+            .head(5)[["productId", "nombre", "cantidad_vendida", "total_ventas"]]
+            .to_dict("records")
+        )
+    except Exception:
+        # Fallback sin pandas
+        top_5 = sorted(
+            [
+                {
+                    "productId": item["productId"],
+                    "nombre": item["nombre"],
+                    "cantidad_vendida": item["cantidad_vendida"],
+                    "total_ventas": item["total_ventas"],
+                }
+                for item in resumen
+            ],
+            key=lambda x: x["total_ventas"],
+            reverse=True,
+        )[:5]
+
+    resumen_agregado = {
+        "total_recaudado": round(total_ventas, 2),
+        "total_items_vendidos": round(total_cantidad, 2),
+        "numero_productos_distintos": len(resumen),
+        "top_5_productos": top_5,
+    }
+
+    # Si se solicita formato de archivo, generar CSV o Excel
+    if formato:
+        if formato.lower() not in {"csv", "excel"}:
+            raise HTTPException(status_code=400, detail="Formato no soportado, use 'csv' o 'excel'")
+        if 'pd' not in locals():
+            raise HTTPException(status_code=500, detail="Pandas es requerido para exportar archivos")
+        import pandas as pd  # asegurar disponibilidad
+        df = pd.DataFrame(resumen)
+        if formato.lower() == "csv":
+            buffer = io.StringIO()
+            df.to_csv(buffer, index=False)
+            buffer.seek(0)
+            return StreamingResponse(
+                io.BytesIO(buffer.getvalue().encode("utf-8")),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f"attachment; filename=reporte_ventas_{fecha_inicio.date()}_{fecha_fin.date()}.csv",
+                },
+            )
+        else:  # excel
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                df.to_excel(writer, index=False, sheet_name="Ventas")
+            buffer.seek(0)
+            return StreamingResponse(
+                buffer,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "Content-Disposition": f"attachment; filename=reporte_ventas_{fecha_inicio.date()}_{fecha_fin.date()}.xlsx",
+                },
+            )
+
+    # Respuesta JSON con resumen y detalle
     return {
         "status": "ok",
         "mensaje": f"Reporte del {fecha_inicio.date()} al {fecha_fin.date()}",
+        "resumen": resumen_agregado,
         "productos": resumen,
     }
 
