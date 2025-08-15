@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+requests
+matplotlib
+pandas
+httpx
+reportlab>=4.0.0
+xlsxwriter
