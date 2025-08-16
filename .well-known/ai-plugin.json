@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "TECO-BOT (Test)",
+  "name_for_model": "teco_bot_test",
+  "description_for_human": "Accede al backend Tecopos (TECO-BOT) para login, productos, inventario y reportes.",
+  "description_for_model": "Use these actions to interact with the Tecopos backend. Available operations: login-tecopos, seleccionar-negocio, crear-producto-con-categoria, entrada-inteligente, inventario, lista de precios, reportes de ventas, quiebre de stock y más.",
+  "auth": { "type": "none" },
+  "api": {
+    "type": "openapi",
+    "url": "https://teco-bottest.onrender.com/openapi.json"
+  },
+  "logo_url": "https://teco-bottest.onrender.com/logo.png",
+  "contact_email": "orlandolora98@gmail.com",
+  "legal_info_url": "https://teco-bottest.onrender.com/legal"
+}
