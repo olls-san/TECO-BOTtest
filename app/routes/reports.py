@@ -17,6 +17,18 @@ from typing import Dict, List, Tuple
 
 from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException, Body, Query
+from datetime import datetime, time as time_mod
+from typing import Dict, Any, Optional, List
+from pydantic import BaseModel, Field
+
+class VentasVariasMonedasRequest(BaseModel):
+    usuario: str
+    fecha_inicio: datetime | str = Field(..., description="ISO datetime o 'YYYY-MM-DD'")
+    fecha_fin: datetime | str = Field(..., description="ISO datetime o 'YYYY-MM-DD'")
+    tasas_cambio: Optional[Dict[str, float]] = Field(
+        default=None,
+        description='Diccionario de tasas. Ej: {"USD_to_CUP": 250, "CUP_to_USD": 0.004}'
+    )
 
 from .. import models
 from ..utils import (
@@ -28,6 +40,35 @@ from ..utils import (
     enriquecer_proyeccion_con_nombres,
     analizar_desempeño_ventas,
 )
+
+def _parse_date_range(fi: datetime | str, ff: datetime | str) -> tuple[str, str]:
+    def _parse(d):
+        if isinstance(d, datetime):
+            return d
+        try:
+            # 'YYYY-MM-DD'
+            return datetime.strptime(d, "%Y-%m-%d")
+        except Exception:
+            # ISO 8601
+            return datetime.fromisoformat(d)
+    d1 = _parse(fi); d2 = _parse(ff)
+    d1 = datetime.combine(d1.date(), time_mod(0, 1))
+    d2 = datetime.combine(d2.date(), time_mod(23, 59))
+    return d1.strftime("%Y-%m-%d %H:%M"), d2.strftime("%Y-%m-%d %H:%M")
+
+def _convert(amount: float, from_code: str, to_code: str, tasas: Optional[Dict[str, float]]) -> Optional[float]:
+    if from_code == to_code:
+        return float(amount)
+    if not tasas:
+        return None
+    key = f"{from_code}_to_{to_code}"
+    rate = tasas.get(key)
+    if rate is None:
+        return None
+    try:
+        return float(amount) * float(rate)
+    except Exception:
+        return None
 
 # Import pydantic for custom request model in reporte_ventas
 from pydantic import BaseModel
@@ -662,3 +703,216 @@ def ticket_promedio(data: models.RangoFechasConHora) -> Dict[str, dict]:
             resumen[moneda]["total_ventas"] / resumen[moneda]["cantidad_ordenes"], 2
         )
     return resumen
+
+@router.post("/reporte-ventas-varias-monedas")
+def reporte_ventas_varias_monedas(data: VentasVariasMonedasRequest):
+    # Bloque obligatorio
+    ctx = user_context.get(data.usuario)
+    if not ctx:
+        raise HTTPException(status_code=403, detail="Usuario no autenticado")
+    base_url = get_base_url(ctx["region"])
+    headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+
+    dateFrom, dateTo = _parse_date_range(data.fecha_inicio, data.fecha_fin)
+
+    # 1) Ventas vendidas
+    url = f"{base_url}/api/v1/report/selled-products"
+    payload = {"dateFrom": dateFrom, "dateTo": dateTo}
+    resp = teco_request("POST", url, headers=headers, json=payload)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="Error al obtener reporte de ventas")
+    ventas = resp.json().get("data") or resp.json()
+    if not isinstance(ventas, list):
+        ventas = [ventas] if ventas else []
+
+    # 2) Stock actual (opcional)
+    stock_map: Dict[int, float] = {}
+    stock_url = f"{base_url}/api/v1/report/stock/disponibility"
+    sresp = teco_request("GET", stock_url, headers=headers)
+    if sresp.status_code == 200:
+        filas = sresp.json().get("data") or sresp.json().get("items") or sresp.json()
+        if not isinstance(filas, list):
+            filas = [filas] if filas else []
+        for r in filas:
+            pid = (r.get("product") or {}).get("id") or r.get("productId")
+            qty = r.get("quantity") or r.get("available") or r.get("stock")
+            if pid is not None and qty is not None:
+                try:
+                    stock_map[int(pid)] = float(qty)
+                except Exception:
+                    pass
+
+    productos_out: List[Dict[str, Any]] = []
+    for v in ventas:
+        pid = v.get("productId") or (v.get("product") or {}).get("id")
+        nombre = v.get("name") or (v.get("product") or {}).get("name") or "SIN_NOMBRE"
+        cantidad = float(v.get("quantitySales") or v.get("quantity") or 0)
+        medida = v.get("measure") or (v.get("product") or {}).get("measure") or ""
+        categoria = v.get("category") or (v.get("product") or {}).get("category") or ""
+        area_venta = v.get("areaSales") or v.get("area") or ""
+
+        # Total ventas por moneda (array u objeto)
+        ventas_arr = v.get("totalSales") or []
+        if isinstance(ventas_arr, dict):  # si viene como objeto único
+            ventas_arr = [ventas_arr]
+
+        totales_por_moneda: Dict[str, float] = {}
+        for t in ventas_arr:
+            code = t.get("codeCurrency") or t.get("currency") or "CUP"
+            amt = float(t.get("amount") or 0)
+            totales_por_moneda[code] = totales_por_moneda.get(code, 0.0) + amt
+
+        # Costos (si están)
+        total_cost = v.get("totalCost") or {}
+        total_fixed = v.get("totalFixedCost") or {}
+        cost_amount = float(total_cost.get("amount") or 0) + float(total_fixed.get("amount") or 0)
+        cost_code = total_cost.get("codeCurrency") or total_fixed.get("codeCurrency") or "CUP"
+
+        # Determinar moneda principal (preferimos CUP si hay tasa)
+        principal = "CUP" if data.tasas_cambio and any(k.endswith("_to_CUP") for k in data.tasas_cambio) else (list(totales_por_moneda.keys())[:1] or ["CUP"])[0]
+
+        # Conversión a la moneda principal
+        venta_principal = 0.0
+        for code, amt in totales_por_moneda.items():
+            conv = _convert(amt, code, principal, data.tasas_cambio)
+            venta_principal += conv if conv is not None else (amt if code == principal else 0.0)
+
+        # Coste convertido a principal
+        coste_principal = _convert(cost_amount, cost_code, principal, data.tasas_cambio)
+        if coste_principal is None and cost_code == principal:
+            coste_principal = cost_amount
+        utilidad_estimada = None
+        if coste_principal is not None:
+            utilidad_estimada = venta_principal - coste_principal
+
+        productos_out.append({
+            "productId": pid,
+            "nombre": nombre,
+            "cantidad_vendida": cantidad,
+            "unidad": medida,
+            "categoria": categoria,
+            "area_venta": area_venta,
+            "stock_actual": stock_map.get(int(pid)) if pid is not None else None,
+            "venta_total_moneda_principal": round(venta_principal, 4),
+            "moneda_principal": principal,
+            "total_coste": float(cost_amount),
+            "moneda_coste": cost_code,
+            "venta_usd": round(totales_por_moneda.get("USD", 0.0), 4),
+            "venta_cup": round(totales_por_moneda.get("CUP", 0.0), 4),
+            "venta_eur": round(totales_por_moneda.get("EUR", 0.0), 4),
+            "coste_convertido_a_moneda_principal": round(coste_principal, 4) if coste_principal is not None else None,
+            "tasa_utilizada": (data.tasas_cambio.get(f"{cost_code}_to_{principal}") if data.tasas_cambio else None),
+            "utilidad_estimada": round(utilidad_estimada, 4) if utilidad_estimada is not None else None,
+        })
+
+    return {
+        "status": "ok",
+        "mensaje": f"Ventas entre {dateFrom} y {dateTo}",
+        "productos": productos_out,
+    }
+
+class AnalisisVariasMonedasRequest(BaseModel):
+    usuario: str
+    fecha_inicio: datetime | str
+    fecha_fin: datetime | str
+    tasas_cambio: Optional[Dict[str, float]] = None
+
+@router.post("/analisis-desempeno-varias-monedas")
+def analisis_desempeno_varias_monedas(data: AnalisisVariasMonedasRequest):
+    # Auth + headers
+    ctx = user_context.get(data.usuario)
+    if not ctx:
+        raise HTTPException(status_code=403, detail="Usuario no autenticado")
+    base_url = get_base_url(ctx["region"])
+    headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+
+    dateFrom, dateTo = _parse_date_range(data.fecha_inicio, data.fecha_fin)
+
+    # Ventas
+    url = f"{base_url}/api/v1/report/selled-products"
+    payload = {"dateFrom": dateFrom, "dateTo": dateTo}
+    resp = teco_request("POST", url, headers=headers, json=payload)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="Error al obtener reporte de ventas")
+    ventas = resp.json().get("data") or resp.json()
+    if not isinstance(ventas, list):
+        ventas = [ventas] if ventas else []
+
+    # Agrega por producto (conversión a principal)
+    principal = "CUP" if data.tasas_cambio and any(k.endswith("_to_CUP") for k in (data.tasas_cambio or {})) else "USD"
+    resumen: Dict[int, Dict[str, Any]] = {}
+
+    for v in ventas:
+        pid = v.get("productId") or (v.get("product") or {}).get("id")
+        if pid is None:
+            # si no hay ID, lo agregamos como -1 nameless
+            pid = -1
+        nombre = v.get("name") or (v.get("product") or {}).get("name") or "SIN_NOMBRE"
+        medida = v.get("measure") or (v.get("product") or {}).get("measure") or ""
+        categoria = v.get("category") or (v.get("product") or {}).get("category") or ""
+        area_venta = v.get("areaSales") or v.get("area") or ""
+        cantidad = float(v.get("quantitySales") or v.get("quantity") or 0)
+
+        ventas_arr = v.get("totalSales") or []
+        if isinstance(ventas_arr, dict):
+            ventas_arr = [ventas_arr]
+
+        totales_por_moneda: Dict[str, float] = {}
+        for t in ventas_arr:
+            code = t.get("codeCurrency") or t.get("currency") or "CUP"
+            amt = float(t.get("amount") or 0)
+            totales_por_moneda[code] = totales_por_moneda.get(code, 0.0) + amt
+
+        total_cost = v.get("totalCost") or {}
+        total_fixed = v.get("totalFixedCost") or {}
+        cost_amount = float(total_cost.get("amount") or 0) + float(total_fixed.get("amount") or 0)
+        cost_code = total_cost.get("codeCurrency") or total_fixed.get("codeCurrency") or "CUP"
+
+        # monto en principal
+        venta_principal = 0.0
+        for code, amt in totales_por_moneda.items():
+            conv = _convert(amt, code, principal, data.tasas_cambio)
+            venta_principal += conv if conv is not None else (amt if code == principal else 0.0)
+
+        coste_principal = _convert(cost_amount, cost_code, principal, data.tasas_cambio)
+        if coste_principal is None and cost_code == principal:
+            coste_principal = cost_amount
+
+        bucket = resumen.setdefault(int(pid), {
+            "productId": pid if pid != -1 else None,
+            "nombre": nombre,
+            "unidad": medida,
+            "categoria": categoria,
+            "area_venta": area_venta,
+            "cantidad_vendida": 0.0,
+            "venta_total_moneda_principal": 0.0,
+            "total_coste_principal": 0.0,
+            "moneda_principal": principal,
+        })
+        bucket["cantidad_vendida"] += cantidad
+        bucket["venta_total_moneda_principal"] += venta_principal
+        bucket["total_coste_principal"] += (coste_principal or 0.0)
+
+    # A la salida en lista + utilidad
+    salida: List[Dict[str, Any]] = []
+    for pid, b in resumen.items():
+        utilidad = b["venta_total_moneda_principal"] - b["total_coste_principal"]
+        salida.append({
+            "productId": b["productId"],
+            "nombre": b["nombre"],
+            "cantidad_vendida": round(b["cantidad_vendida"], 4),
+            "unidad": b["unidad"],
+            "categoria": b["categoria"],
+            "area_venta": b["area_venta"],
+            "venta_total_moneda_principal": round(b["venta_total_moneda_principal"], 4),
+            "moneda_principal": b["moneda_principal"],
+            "total_coste": round(b["total_coste_principal"], 4),
+            "moneda_coste": b["moneda_principal"],  # ya convertido a principal
+            "utilidad_estimada": round(utilidad, 4),
+        })
+
+    return {
+        "status": "ok",
+        "mensaje": f"Análisis generado entre {dateFrom} y {dateTo}",
+        "resultado": salida,
+    }
