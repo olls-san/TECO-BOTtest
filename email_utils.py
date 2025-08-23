@@ -16,8 +16,8 @@ from typing import Tuple, Optional
 
 # Read the sender and password from environment variables.  These
 # environment variables must be set in the deployment environment.
-GMAIL_REMITENTE: str = os.getenv("GMAIL_REMITENTE", "")
-GMAIL_PASSWORD: str = os.getenv("GMAIL_PASSWORD", "")
+GMAIL_REMITENTE: str = "tecobot2022@gmail.com"
+GMAIL_PASSWORD: str = "bwon lxka asxv cadg"
 
 def enviar_correo(
     destinatario: str,
