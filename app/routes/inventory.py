@@ -14,6 +14,18 @@ from typing import Dict, List
 # Use the shared HTTP client with retries and timeouts
 from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException
+from typing import Optional, Literal
+from datetime import datetime
+import io, csv
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
+
+from email_utils import enviar_correo
+
 
 from .. import models
 from ..utils import (
@@ -156,3 +168,138 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
         area_id=area["id"],
         resumen=resultados,
     )
+
+@router.get("/totalizar-inventario")
+def totalizar_inventario(
+    usuario: str,
+    enviar_por_correo: bool = False,
+    destinatario: Optional[str] = None,
+    formato: Literal["excel", "pdf"] = "excel",
+):
+    """
+    Devuelve inventario con claves fijas y, opcionalmente, lo envía por correo.
+    - productos[i]: { nombre, disponibilidad, medida }
+    - envio_correo: { solicitado, realizado, formato, destinatario, mensaje }
+    """
+    # 1) Autenticación + headers
+    ctx = user_context.get(usuario)
+    if not ctx:
+        raise HTTPException(status_code=403, detail="Usuario no autenticado")
+    base_url = get_base_url(ctx["region"])
+    headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+
+    # 2) Llamada a Tecopos
+    url = f"{base_url}/api/v1/report/stock/disponibility"
+    resp = teco_request("GET", url, headers=headers)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail="No se pudo obtener el inventario")
+
+    filas = resp.json().get("data") or resp.json().get("items") or resp.json()
+    if not isinstance(filas, list):
+        filas = [filas] if filas else []
+
+    # 3) Normalización → claves fijas
+    productos = []
+    for row in filas:
+        nombre = (
+            row.get("productName")
+            or (row.get("product") or {}).get("name")
+            or row.get("name")
+            or "SIN_NOMBRE"
+        )
+        cantidad = float(row.get("quantity") or row.get("available") or row.get("stock") or 0)
+        medida = (
+            row.get("measure")
+            or row.get("measureShortName")
+            or (row.get("product") or {}).get("measure")
+            or ""
+        )
+        productos.append({
+            "nombre": str(nombre),
+            "disponibilidad": cantidad,
+            "medida": str(medida),
+        })
+
+    resultado = {
+        "status": "ok",
+        "total": len(productos),
+        "productos": productos,
+        "envio_correo": {
+            "solicitado": bool(enviar_por_correo),
+            "realizado": False,
+            "formato": formato,
+            "destinatario": destinatario or None,
+            "mensaje": None,
+        },
+    }
+
+    # 4) Envío opcional por correo
+    if enviar_por_correo:
+        if not destinatario:
+            raise HTTPException(status_code=400, detail="Debe enviar 'destinatario' para el envío por correo.")
+
+        ahora = datetime.now().strftime("%Y-%m-%d_%H%M")
+        mensaje_extra = None
+
+        if formato == "pdf" and not REPORTLAB_AVAILABLE:
+            formato = "excel"
+            mensaje_extra = "reportlab no instalado; se envía CSV (excel)."
+
+        if formato == "excel":
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=["nombre", "disponibilidad", "medida"])
+            writer.writeheader()
+            writer.writerows(productos)
+            data_bytes = io.BytesIO(buf.getvalue().encode("utf-8"))
+            nombre_archivo = f"inventario_{ahora}.csv"
+            mime = ("text", "csv")
+
+        elif formato == "pdf":
+            data_bytes = io.BytesIO()
+            c = canvas.Canvas(data_bytes, pagesize=A4)
+            width, height = A4
+            y = height - 40
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(40, y, "Totalizar Inventario")
+            y -= 20
+            c.setFont("Helvetica", 10)
+            c.drawString(40, y, f"Generado: {datetime.now().isoformat(timespec='seconds')}")
+            y -= 30
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(40, y, "Nombre")
+            c.drawString(300, y, "Disponibilidad")
+            c.drawString(420, y, "Medida")
+            y -= 16
+            c.setFont("Helvetica", 10)
+            for p in productos:
+                if y < 60:
+                    c.showPage(); y = height - 60
+                c.drawString(40, y, p["nombre"][:55])
+                c.drawRightString(400, y, f'{p["disponibilidad"]}')
+                c.drawString(420, y, p["medida"][:15])
+                y -= 14
+            c.showPage(); c.save()
+            data_bytes.seek(0)
+            nombre_archivo = f"inventario_{ahora}.pdf"
+            mime = ("application", "pdf")
+
+        else:
+            raise HTTPException(status_code=400, detail="Formato no soportado")
+
+        asunto = "Totalizar inventario"
+        cuerpo = "Se adjunta el inventario solicitado."
+        if mensaje_extra:
+            cuerpo += f" Nota: {mensaje_extra}"
+
+        ok = enviar_correo(
+            destinatario=destinatario,
+            asunto=asunto,
+            cuerpo=cuerpo,
+            archivo_adjunto=data_bytes,
+            nombre_archivo=nombre_archivo,
+            tipo_mime=mime,
+        )
+        resultado["envio_correo"]["realizado"] = bool(ok)
+        resultado["envio_correo"]["mensaje"] = "Correo enviado" if ok else "No se pudo enviar el correo"
+
+    return resultado
