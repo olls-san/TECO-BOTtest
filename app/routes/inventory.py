@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-import requests
+# Use the shared HTTP client with retries and timeouts
+from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException
 
 from .. import models
@@ -35,7 +36,7 @@ def listar_areas(usuario: str):
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     url = f"{base_url}/api/v1/administration/area"
     params = {"page": 1, "type": "STOCK"}
-    response = requests.get(url, headers=headers, params=params)
+    response = teco_request("GET", url, headers=headers, params=params)
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code, detail="Error al obtener las áreas")
     items = response.json().get("items", [])
@@ -52,7 +53,7 @@ def rendimiento_helado(data: models.RendimientoHeladoRequest):
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     # Get area by name
     url_areas = f"{base_url}/api/v1/administration/area?page=1&type=STOCK"
-    response_areas = requests.get(url_areas, headers=headers)
+    response_areas = teco_request("GET", url_areas, headers=headers)
     if response_areas.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron obtener las áreas")
     areas = response_areas.json().get("items", [])
@@ -64,7 +65,7 @@ def rendimiento_helado(data: models.RendimientoHeladoRequest):
         f"{base_url}/api/v1/administration/movement?areaId={area_id}&all_data=true"
         f"&dateFrom={data.fecha_inicio}&dateTo={data.fecha_fin}&category=TRANSFORMATION"
     )
-    response_mov = requests.get(movimientos_url, headers=headers)
+    response_mov = teco_request("GET", movimientos_url, headers=headers)
     if response_mov.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron obtener los movimientos")
     movimientos = response_mov.json().get("items", [])
@@ -109,7 +110,7 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     areas_url = f"{base_url}/api/v1/administration/area?page=1&type=STOCK"
-    res_areas = requests.get(areas_url, headers=headers)
+    res_areas = teco_request("GET", areas_url, headers=headers)
     if res_areas.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron obtener las áreas")
     areas = res_areas.json().get("items", [])
@@ -121,7 +122,7 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
         f"{base_url}/api/v1/administration/movement?areaId={area_id}&all_data=true"
         f"&dateFrom={data.fecha_inicio}&dateTo={data.fecha_fin}&category=TRANSFORMATION"
     )
-    response_mov = requests.get(movimientos_url, headers=headers)
+    response_mov = teco_request("GET", movimientos_url, headers=headers)
     if response_mov.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron obtener los movimientos")
     movimientos = response_mov.json().get("items", [])

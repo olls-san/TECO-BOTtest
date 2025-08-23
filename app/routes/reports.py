@@ -15,8 +15,7 @@ import time as time_module
 from datetime import datetime, timedelta, time, timezone
 from typing import Dict, List, Tuple
 
-import httpx
-import requests
+from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException, Body, Query
 
 from .. import models
@@ -30,6 +29,11 @@ from ..utils import (
     analizar_desempeño_ventas,
 )
 
+# Import pydantic for custom request model in reporte_ventas
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from datetime import time as time_cls
+
 router = APIRouter()
 
 # Set up a dedicated logger for ventas_diarias similar to the original code
@@ -42,8 +46,9 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 
-@router.post("/reporte-ventas")
-def reporte_ventas(
+# Disabled original reporte_ventas; see optimised version below
+#@router.post("/reporte-ventas")
+def reporte_ventas_old(
     data: models.ReporteVentasRequest,
     formato: str | None = Query(
         None,
@@ -69,7 +74,7 @@ def reporte_ventas(
         "dateTo": fecha_fin.strftime("%Y-%m-%d %H:%M"),
         "status": "BILLED",
     }
-    res = requests.get(url, headers=headers, params=params)
+    res = teco_request("GET", url, headers=headers, params=params)
     if res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudo obtener el reporte de ventas")
     productos_raw = res.json().get("products", [])
@@ -180,6 +185,92 @@ def reporte_ventas(
         "productos": resumen,
     }
 
+class ReporteVentasRequestNuevo(BaseModel):
+    """
+    Request body for the reporte-ventas endpoint.
+
+    Extends the original ReporteVentasRequest by adding an optional
+    ``incluir_stock`` flag to include inventory levels in the summary.
+    """
+    usuario: str
+    fecha_inicio: datetime
+    fecha_fin: datetime
+    incluir_stock: Optional[bool] = False
+
+@router.post("/reporte-ventas", summary="Genera reporte de ventas con totales (y stock opcional)")
+def reporte_ventas(data: ReporteVentasRequestNuevo):
+    """
+    Genera un reporte de ventas entre dos fechas y devuelve totales de ventas,
+    ítems vendidos y productos distintos.  Si ``incluir_stock`` es True se
+    incluye un desglose del stock disponible por almacén.
+    """
+    # Validación y contexto de autenticación
+    ctx = user_context.get(data.usuario)
+    if not ctx:
+        raise HTTPException(status_code=403, detail="Usuario no autenticado")
+    base_url = get_base_url(ctx["region"])
+    headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+
+    # Normaliza las fechas al rango completo del día
+    fi = datetime.combine(data.fecha_inicio.date(), time_cls(0, 1))
+    ff = datetime.combine(data.fecha_fin.date(), time_cls(23, 59))
+
+    # Llamada a la API de Tecopos (POST) para obtener el resumen de ventas
+    url = f"{base_url}/api/v1/report/selled-products"
+    payload = {
+        "dateFrom": fi.strftime("%Y-%m-%d %H:%M"),
+        "dateTo": ff.strftime("%Y-%m-%d %H:%M"),
+    }
+    resp = teco_request("POST", url, headers=headers, json=payload)
+    if resp.status_code == 401:
+        raise HTTPException(status_code=401, detail="Token inválido o expirado")
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    data_json = resp.json()
+
+    ventas = data_json.get("data") or data_json
+    if not isinstance(ventas, list):
+        ventas = [ventas] if ventas else []
+
+    total_ventas = 0.0
+    cant_items_vendidos = 0
+    cant_productos_vendidos = 0
+
+    for v in ventas:
+        # Algunos endpoints devuelven nombres distintos para los campos; se cubren ambos
+        total_ventas += float(v.get("totalAmount") or v.get("total") or 0)
+        cant_items_vendidos += int(v.get("itemsCount") or v.get("items") or 0)
+        cant_productos_vendidos += int(v.get("productsCount") or v.get("products") or 0)
+
+    resultado: Dict[str, Any] = {
+        "rango": {"desde": fi.isoformat(), "hasta": ff.isoformat()},
+        "resumen": {
+            "total_ventas": round(total_ventas, 2),
+            "cantidad_items_vendidos": cant_items_vendidos,
+            "cantidad_productos_vendidos": cant_productos_vendidos,
+        },
+        "raw": ventas,
+    }
+
+    if data.incluir_stock:
+        stock_url = f"{base_url}/api/v1/report/stock/disponibility"
+        stock_resp = teco_request("GET", stock_url, headers=headers)
+        if stock_resp.status_code >= 400:
+            raise HTTPException(status_code=stock_resp.status_code, detail=stock_resp.text)
+        filas = stock_resp.json().get("data") or stock_resp.json()
+        if not isinstance(filas, list):
+            filas = [filas] if filas else []
+        por_almacen: Dict[str, float] = {}
+        total_general = 0.0
+        for row in filas:
+            stock_name = str(row.get("stockName") or "SIN_NOMBRE")
+            qty = float(row.get("quantity") or 0)
+            por_almacen[stock_name] = por_almacen.get(stock_name, 0.0) + qty
+            total_general += qty
+        resultado["stock"] = {"por_almacen": por_almacen, "total_general": total_general}
+
+    return resultado
+
 
 @router.post("/reporte-quiebre-stock")
 def reporte_quiebre_stock(request: models.QuiebreRequest):
@@ -258,7 +349,7 @@ def analisis_desempeno(data: models.AnalisisDesempenoRequest):
         "dateTo": fecha_fin.strftime("%Y-%m-%d %H:%M"),
         "status": "BILLED",
     }
-    res = requests.get(url, headers=headers, params=params)
+    res = teco_request("GET", url, headers=headers, params=params)
     if res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudo obtener el reporte de ventas")
     productos_raw = res.json().get("products", [])
@@ -314,7 +405,7 @@ def ventas_diarias(data: Dict[str, str]):
         logger.info(f"➡️ URL: {url}")
         logger.info(f"➡️ HEADERS: {headers}")
         try:
-            res = requests.get(url, headers=headers)
+            res = teco_request("GET", url, headers=headers)
             logger.info(f"⬅️ Status Code: {res.status_code}")
             logger.info(f"⬅️ Respuesta: {res.text[:500]}")
             if res.status_code != 200:
@@ -446,7 +537,7 @@ def reporte_ventas_global(data: models.ReporteGlobalRequest):
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     params = {"dateFrom": fi.date().isoformat(), "dateTo": ff.date().isoformat()}
     url = f"{base_url}/api/v1/report/incomes/v2/total-sales"
-    resp = requests.get(url, headers=headers, params=params, timeout=30)
+    resp = teco_request("GET", url, headers=headers, params=params)
     if resp.status_code != 200:
         raise HTTPException(
             status_code=500,
@@ -550,7 +641,7 @@ def ticket_promedio(data: models.RangoFechasConHora) -> Dict[str, dict]:
         "status": "BILLED",
     }
     url = f"{url_base}/api/v1/report/byorders"
-    response = httpx.get(url, headers=headers, params=params)
+    response = teco_request("GET", url, headers=headers, params=params)
     if response.status_code != 200:
         raise HTTPException(status_code=500, detail="Error al obtener órdenes")
     response_data = response.json()

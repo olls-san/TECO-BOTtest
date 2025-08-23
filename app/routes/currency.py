@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import List, Dict, Optional
 
-import requests
+# Use the shared HTTP client with retries and timeouts
+from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException
 
 from .. import models
@@ -29,7 +30,7 @@ def actualizar_monedas(data: models.CambioMonedaRequest):
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     info_url = f"{base_url}/api/v1/administration/my-business"
-    info_res = requests.get(info_url, headers=headers)
+    info_res = teco_request("GET", info_url, headers=headers)
     if info_res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudo obtener información del negocio")
     price_systems = info_res.json().get("priceSystems", [])
@@ -50,7 +51,7 @@ def actualizar_monedas(data: models.CambioMonedaRequest):
     page = 1
     while True:
         url = f"{base_url}/api/v1/administration/product?page={page}"
-        res = requests.get(url, headers=headers)
+        res = teco_request("GET", url, headers=headers)
         if res.status_code != 200:
             raise HTTPException(status_code=500, detail=f"Error al obtener productos (página {page})")
         items = res.json().get("items", [])
@@ -85,7 +86,7 @@ def actualizar_monedas(data: models.CambioMonedaRequest):
                     }
                 ],
             }
-            patch_res = requests.patch(patch_url, headers=headers, json=patch_payload)
+            patch_res = teco_request("PATCH", patch_url, headers=headers, json=patch_payload)
             if patch_res.status_code in [200, 204]:
                 actualizados.append(p["name"])
             else:

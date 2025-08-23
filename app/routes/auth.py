@@ -10,7 +10,8 @@ application.
 
 from __future__ import annotations
 
-import requests
+# Use the shared HTTP client with retries and timeouts instead of direct requests
+from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException
 
 from .. import models
@@ -43,12 +44,12 @@ def login_tecopos(data: models.LoginData):
         "x-app-origin": "Tecopos-Admin",
         "User-Agent": "Mozilla/5.0",
     }
-    res = requests.post(login_url, headers=headers, json={"username": usuario, "password": data.password})
+    res = teco_request("POST", login_url, headers=headers, json={"username": usuario, "password": data.password})
     if res.status_code != 200:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
     token = res.json().get("token")
     headers["Authorization"] = f"Bearer {token}"
-    info_res = requests.get(userinfo_url, headers=headers)
+    info_res = teco_request("GET", userinfo_url, headers=headers)
     if info_res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudo obtener la información del usuario")
     business_id = info_res.json().get("businessId")
@@ -56,7 +57,7 @@ def login_tecopos(data: models.LoginData):
         raise HTTPException(status_code=500, detail="No se pudo obtener token o businessId")
     # Store user context
     user_context[usuario] = {"token": token, "businessId": business_id, "region": region}
-    branches_res = requests.get(branches_url, headers=headers)
+    branches_res = teco_request("GET", branches_url, headers=headers)
     if branches_res.status_code != 200:
         raise HTTPException(status_code=500, detail="Error al obtener las sucursales del usuario")
     branches = branches_res.json()
@@ -102,7 +103,7 @@ def seleccionar_negocio(data: models.SeleccionNegocio):
         "x-app-origin": "Tecopos-Admin",
         "User-Agent": "Mozilla/5.0",
     }
-    res = requests.get(branches_url, headers=headers)
+    res = teco_request("GET", branches_url, headers=headers)
     if res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron obtener los negocios del usuario")
     negocios = res.json()

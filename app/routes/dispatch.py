@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Tuple
 
-import requests
+# Use the shared HTTP client with retries and timeouts
+from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException
 
 from .. import models
@@ -40,7 +41,7 @@ def replicar_productos(data: models.ReplicarProductosRequest):
     # If missing business IDs, return available branches
     if not data.negocio_origen_id or not data.negocio_destino_id:
         headers = get_auth_headers(token, ctx["businessId"], ctx["region"])
-        resp = requests.get(f"{base_url}/api/v1/administration/my-branches", headers=headers)
+        resp = teco_request("GET", f"{base_url}/api/v1/administration/my-branches", headers=headers)
         if resp.status_code != 200:
             raise HTTPException(status_code=500, detail="No se pudieron obtener los negocios disponibles")
         return {"negocios_disponibles": resp.json()}
@@ -48,8 +49,8 @@ def replicar_productos(data: models.ReplicarProductosRequest):
     headers_origen = get_auth_headers(token, data.negocio_origen_id, ctx["region"])
     headers_destino = get_auth_headers(token, data.negocio_destino_id, ctx["region"])
     if not data.area_origen_nombre or not data.area_destino_nombre:
-        resp_origen = requests.get(f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_origen)
-        resp_destino = requests.get(f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_destino)
+        resp_origen = teco_request("GET", f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_origen)
+        resp_destino = teco_request("GET", f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_destino)
         if resp_origen.status_code != 200 or resp_destino.status_code != 200:
             raise HTTPException(status_code=500, detail="No se pudieron obtener las áreas de stock")
         areas_origen = resp_origen.json().get("items", [])
@@ -65,8 +66,8 @@ def replicar_productos(data: models.ReplicarProductosRequest):
             "areas_destino": [simplificar_area(a) for a in areas_destino if a["business"]["id"] == data.negocio_destino_id],
         }
     # Find IDs of specified areas
-    resp_origen = requests.get(f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_origen)
-    resp_destino = requests.get(f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_destino)
+    resp_origen = teco_request("GET", f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_origen)
+    resp_destino = teco_request("GET", f"{base_url}/api/v1/administration/area?page=1&type=STOCK", headers=headers_destino)
     areas_origen = resp_origen.json().get("items", [])
     areas_destino = resp_destino.json().get("items", [])
     area_origen = next((a for a in areas_origen if a["name"] == data.area_origen_nombre and a["business"]["id"] == data.negocio_origen_id), None)
@@ -77,7 +78,7 @@ def replicar_productos(data: models.ReplicarProductosRequest):
     productos_ids: List[int] = []
     pagina = 1
     while True:
-        resp = requests.get(f"{base_url}/api/v1/administration/product/area/{area_origen['id']}?page={pagina}", headers=headers_origen)
+        resp = teco_request("GET", f"{base_url}/api/v1/administration/product/area/{area_origen['id']}?page={pagina}", headers=headers_origen)
         if resp.status_code != 200:
             raise HTTPException(status_code=500, detail=f"Error al obtener productos del área de stock en la página {pagina}")
         resultado = resp.json()
@@ -101,7 +102,7 @@ def replicar_productos(data: models.ReplicarProductosRequest):
         "mode": "MOVEMENT",
         "products": [{"productId": pid, "quantity": 0} for pid in productos_ids],
     }
-    resp_despacho = requests.post(f"{base_url}/api/v1/administration/dispatch/v3", json=despacho_payload, headers=headers_origen)
+    resp_despacho = teco_request("POST", f"{base_url}/api/v1/administration/dispatch/v3", headers=headers_origen, json=despacho_payload)
     if resp_despacho.status_code != 201:
         raise HTTPException(status_code=500, detail=f"Error al crear el despacho: {resp_despacho.text}")
     return {
@@ -142,7 +143,7 @@ def crear_carga_con_productos(data: models.CrearCargaConProductosRequest):
         "operationsCosts": [],
     }
     url = f"{base_url}/api/v1/administration/buyedreceipt/v2"
-    r = requests.post(url, json=payload, headers=headers)
+    r = teco_request("POST", url, headers=headers, json=payload)
     if r.status_code != 200:
         raise HTTPException(status_code=r.status_code, detail=r.text)
     return {
@@ -197,7 +198,7 @@ def listar_cargas_disponibles(usuario: str):
     pagina = 1
     while True:
         url = f"{base_url}/api/v1/administration/buyedreceipt?page={pagina}"
-        r = requests.get(url, headers=headers)
+        r = teco_request("GET", url, headers=headers)
         if r.status_code != 200:
             raise HTTPException(status_code=r.status_code, detail=r.text)
         data_json = r.json()

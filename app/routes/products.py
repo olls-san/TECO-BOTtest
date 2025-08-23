@@ -12,7 +12,8 @@ from __future__ import annotations
 
 from typing import List
 
-import requests
+# Use the shared HTTP client with retries and timeouts
+from app.core.http_sync import teco_request
 from fastapi import APIRouter, HTTPException
 
 from .. import models
@@ -54,7 +55,7 @@ def crear_producto_con_categoria(data: models.Producto):
         "images": [],
         "salesCategoryId": categoria_id,
     }
-    crear_res = requests.post(crear_url, headers=headers, json=crear_payload)
+    crear_res = teco_request("POST", crear_url, headers=headers, json=crear_payload)
     if crear_res.status_code not in [200, 201]:
         raise HTTPException(status_code=500, detail="No se pudo crear el producto")
     return {
@@ -81,7 +82,7 @@ def entrada_inteligente(data: models.EntradaInteligenteRequest):
     # If no stock area specified, return available stock areas
     if not data.stockAreaId:
         almacenes_url = f"{base_url}/api/v1/administration/area?type=STOCK"
-        res = requests.get(almacenes_url, headers=headers)
+        res = teco_request("GET", almacenes_url, headers=headers)
         if res.status_code != 200:
             raise HTTPException(status_code=500, detail="No se pudieron obtener los almacenes")
         almacenes = res.json().get("items", [])
@@ -101,7 +102,7 @@ def entrada_inteligente(data: models.EntradaInteligenteRequest):
             "stockAreaId": data.stockAreaId,
             "continue": False,
         }
-        entrada_res = requests.post(entrada_url, headers=headers, json=entrada_payload)
+        entrada_res = teco_request("POST", entrada_url, headers=headers, json=entrada_payload)
         if entrada_res.status_code not in [200, 201]:
             raise HTTPException(status_code=500, detail=f"No se pudo dar entrada a '{prod.nombre}'")
         procesados.append(prod.nombre)

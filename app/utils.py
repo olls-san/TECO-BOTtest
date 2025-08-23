@@ -14,14 +14,23 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-import requests
+# Use the shared HTTP client with retries and timeouts instead of direct requests
+from app.core.http_sync import teco_request
 from fastapi import HTTPException
 
 
-# In-memory session store keyed by username.  This global is shared
-# between modules via import. It holds the authentication token and
-# other context such as selected businessId and region.
-user_context: Dict[str, Dict[str, object]] = {}
+# Import the shared user_context from the session module.  Do not
+# define a local user_context here otherwise multiple modules will end
+# up with distinct dictionaries.  Centralising the context in
+# ``app/session.py`` ensures that all routes and helpers share the
+# same in-memory session store.
+from .session import user_context  # noqa: F401  re-export for backwards compatibility
+
+# Note: ``user_context`` is now provided by ``app.session``.  The
+# import above re-exports it under this module for backwards
+# compatibility with existing imports (e.g. ``from ..utils import
+# user_context``).  When modifying this file please do not assign
+# directly to ``user_context``; instead import it from ``app.session``.
 
 
 # -----------------------------------------------------------------------------
@@ -147,18 +156,19 @@ def obtener_o_crear_categoria(nombre_categoria: str, base_url: str, headers: Dic
     during creation or retrieval will raise an HTTPException.
     """
     cat_url = f"{base_url}/api/v1/administration/salescategory"
-    res = requests.get(cat_url, headers=headers)
+    # Use teco_request for GET requests
+    res = teco_request("GET", cat_url, headers=headers)
     if res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron consultar las categorías")
     categorias = res.json().get("items", [])
     existente = next((c for c in categorias if normalizar(c.get("name", "")) == normalizar(nombre_categoria)), None)
     if existente:
         return existente["id"]
-    crear_res = requests.post(cat_url, headers=headers, json={"name": nombre_categoria})
+    crear_res = teco_request("POST", cat_url, headers=headers, json={"name": nombre_categoria})
     if crear_res.status_code not in [200, 201]:
         raise HTTPException(status_code=500, detail="No se pudo crear la categoría")
     # Re-fetch categories to obtain the new id
-    res = requests.get(cat_url, headers=headers)
+    res = teco_request("GET", cat_url, headers=headers)
     if res.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron volver a consultar las categorías")
     categorias = res.json().get("items", [])
@@ -217,7 +227,8 @@ def enriquecer_proyeccion_con_nombres(usuario: str, proyeccion: List[Dict[str, o
     pagina = 1
     while True:
         url = f"{base_url}/api/v1/administration/product?page={pagina}"
-        resp_json = requests.get(url, headers=headers).json()
+        resp = teco_request("GET", url, headers=headers)
+        resp_json = resp.json()
         productos = resp_json.get("items", [])
         if not productos:
             break
@@ -243,7 +254,7 @@ def crear_o_buscar_producto(producto: "ProductoEntradaInteligente", base_url: st
     """
     nombre_norm = normalizar(producto.nombre)
     search_url = f"{base_url}/api/v1/administration/product?search={producto.nombre}"
-    res = requests.get(search_url, headers=headers)
+    res = teco_request("GET", search_url, headers=headers)
     if res.status_code != 200:
         raise HTTPException(status_code=500, detail=f"No se pudo buscar '{producto.nombre}'")
     items = res.json().get("items", [])
@@ -262,7 +273,7 @@ def crear_o_buscar_producto(producto: "ProductoEntradaInteligente", base_url: st
         "images": [],
         "salesCategoryId": categoria_id,
     }
-    crear_res = requests.post(crear_url, headers=headers, json=crear_payload)
+    crear_res = teco_request("POST", crear_url, headers=headers, json=crear_payload)
     if crear_res.status_code not in [200, 201]:
         raise HTTPException(status_code=500, detail=f"No se pudo crear '{producto.nombre}'")
     return crear_res.json().get("id")
@@ -328,7 +339,7 @@ def buscar_producto(ctx: Dict[str, object], code: str) -> Optional[Dict[str, obj
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     url = f"{base_url}/api/v1/administration/product/search?code={code}"
-    r = requests.get(url, headers=headers)
+    r = teco_request("GET", url, headers=headers)
     if r.status_code == 200 and r.json():
         return r.json()[0]
     return None
@@ -338,7 +349,7 @@ def crear_categoria_si_no_existe(ctx: Dict[str, object], nombre_categoria: str) 
     """Ensure a sales category exists for the current business and return its id."""
     url = f"{get_base_url(ctx['region'])}/api/v1/administration/salescategory"
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
-    r = requests.post(url, json={"name": nombre_categoria}, headers=headers)
+    r = teco_request("POST", url, headers=headers, json={"name": nombre_categoria})
     if r.status_code == 200:
         return r.json()["id"]
     elif r.status_code == 409:
@@ -362,7 +373,7 @@ def crear_producto(ctx: Dict[str, object], producto: "ProductoCarga", categoria_
         "barcode": producto.barcode,
         "categoryId": categoria_id,
     }
-    r = requests.post(url, json=payload, headers=headers)
+    r = teco_request("POST", url, headers=headers, json=payload)
     if r.status_code != 200:
         raise HTTPException(status_code=r.status_code, detail=r.text)
     return r.json()["id"]
@@ -373,7 +384,7 @@ def buscar_producto_por_nombre(ctx: Dict[str, object], nombre: str) -> Optional[
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     url = f"{base_url}/api/v1/administration/product?search={nombre}"
-    r = requests.get(url, headers=headers)
+    r = teco_request("GET", url, headers=headers)
     if r.status_code == 200:
         data = r.json()
         productos = data.get("items", []) if isinstance(data, dict) else []
@@ -403,7 +414,7 @@ def registrar_producto_en_carga(ctx: Dict[str, object], carga_id: int, product_i
         "registeredPrice": {"amount": amount, "codeCurrency": code_currency},
         "uniqueCode": lote,
     }
-    response = requests.post(url, json=payload, headers=headers)
+    response = teco_request("POST", url, headers=headers, json=payload)
     if response.status_code not in [200, 201]:
         raise Exception(
             f"Error al registrar '{getattr(prod, 'name', 'Desconocido')}': "
