@@ -5,7 +5,7 @@ Endpoints:
 - GET  /listar-areas
 - POST /rendimiento-helado
 - POST /rendimiento-yogurt
-- GET  /totalizar-inventario  (arreglado: autodetección de paginación, sin loops)
+- GET  /totalizar-inventario  (MIN: solo productName, disponibility, total_cost + resumen)
 """
 
 from __future__ import annotations
@@ -28,10 +28,10 @@ from ..utils import (
     extraer_sabor,
 )
 
-# Email
+# Email (no se usa en el endpoint mínimo, pero se deja disponible)
 from email_utils import enviar_correo
 
-# Dependencias opcionales (exportaciones)
+# Dependencias opcionales (no usadas por el endpoint mínimo)
 try:
     import openpyxl
     from openpyxl.workbook import Workbook
@@ -110,7 +110,7 @@ def _parse_stock_rows(raw_json: dict | list) -> List[Dict[str, Any]]:
     - Lee 'result' si existe (estructura del backend mostrada).
     - Usa 'disponibility' como cantidad (si falta, cae a suma de stocks[].quantity).
     - Aplica ZERO_EPS para convertir "casi ceros" a 0.
-    - Devuelve campos estándar usados por el endpoint: nombre, disponibilidad, medida, almacen="".
+    - Devuelve campos estándar usados por otras vistas (no se usa en el endpoint mínimo).
     """
     # 1) Detecta la lista real de filas
     if isinstance(raw_json, dict) and isinstance(raw_json.get("result"), list):
@@ -163,9 +163,7 @@ def _parse_stock_rows(raw_json: dict | list) -> List[Dict[str, Any]]:
 def _agrupar_por_almacen(items: List[Dict[str, Any]]):
     """
     Agrupa productos por 'almacen' y calcula totales.
-    Devuelve:
-    - total_global (float)
-    - por_almacen: [{ almacen, total_cantidad, productos: [...] }]
+    (No se usa en el endpoint mínimo; se conserva por compatibilidad.)
     """
     grupos: Dict[str, Dict[str, Any]] = {}
     total_global = 0.0
@@ -194,6 +192,8 @@ def _agrupar_por_almacen(items: List[Dict[str, Any]]):
 
 def _json_items_or_list(obj):
     """Devuelve (lista_items, meta_json)."""
+    if isinstance(obj, dict) and isinstance(obj.get("result"), list):
+        return obj["result"], obj
     return _first_list_of_dicts(obj), obj
 
 
@@ -384,26 +384,17 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
 
 
 # =========================
-# TOTALIZAR INVENTARIO (FIX)
+# TOTALIZAR INVENTARIO (MÍNIMO)
 # =========================
 
 @router.get("/totalizar-inventario")
-def totalizar_inventario(
-    usuario: str,
-    enviar_por_correo: bool = False,
-    destinatario: Optional[str] = None,
-    formato: Literal["excel", "pdf"] = "excel",
-    incluir_costo_pdf: bool = False,  # SOLO afecta al PDF (JSON/Excel/CSV sí incluyen costo)
-):
+def totalizar_inventario(usuario: str):
     """
-    ÚNICA VISTA: 'disponibles por producto'
-    - Lista productos con disponibilidad > 0 (Producto, Disponibilidad, Medida, CostoUnitario, Moneda)
-    - Resumen: total_items y costos_por_moneda; si hay una moneda única -> costo_total + moneda
-    - Autodetección de paginación (con guardas anti-loop).
-    - Sin redondeos: se retornan floats tal cual.
-    - 'incluir_costo_pdf' controla SOLO la impresión de columnas de costo en PDF.
+    Respuesta mínima por PRODUCTO:
+      - productos[]: [{ productName, disponibility, total_cost }]
+      - resumen: { items, disponibilidad_total, costo_total }
+    Sin vistas por almacén ni exportaciones para evitar 'response too large'.
     """
-
     # 1) Autenticación + headers
     ctx = user_context.get(usuario)
     if not ctx:
@@ -413,315 +404,76 @@ def totalizar_inventario(
 
     url = f"{base_url}/api/v1/report/stock/disponibility"
 
-    # 2) Primer fetch
-    try:
-        first = teco_request("GET", url, headers=headers, params={"page": 1})
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error de red: {e}")
+    productos: List[Dict[str, Any]] = []
 
-    if not (200 <= first.status_code < 300):
-        raise HTTPException(status_code=first.status_code, detail=first.text or "No se pudo obtener inventario")
+    # 2) Traer páginas de forma segura (si aplica)
+    page = 1
+    last_digest: Optional[str] = None
+    MAX_PAGES = 1000  # guarda extra
 
-    first_json = first.json()
-    first_items_raw, first_meta = _json_items_or_list(first_json)
+    while page <= MAX_PAGES:
+        try:
+            resp = teco_request("GET", url, headers=headers, params={"page": page})
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Error de red: {e}")
 
-    # Parse base por PRODUCTO (nombre, disponibilidad, medida)
-    items_norm: List[Dict[str, Any]] = _parse_stock_rows(first_json)
+        if not (200 <= resp.status_code < 300):
+            raise HTTPException(status_code=resp.status_code, detail=resp.text or f"Error en página {page}")
 
-    # Detectar moneda toplevel si viene
-    default_currency = first_json.get("costCurrency")
+        js = resp.json()
 
-    # 2.b Paginación si aplica
-    next_hint = _has_next_page(first_meta, page=1)
-    if next_hint is True:
-        max_pages = 1000
-        prev_digest = _digest_page(first_items_raw)
-        page = 2
-        while page <= max_pages:
-            try:
-                resp = teco_request("GET", url, headers=headers, params={"page": page})
-            except Exception as e:
-                raise HTTPException(status_code=502, detail=f"Error de red en página {page}: {e}")
+        # Soportar estructura con { result: [...] }
+        rows = js["result"] if isinstance(js, dict) and isinstance(js.get("result"), list) else _first_list_of_dicts(js)
+        if not rows:
+            break
 
-            if not (200 <= resp.status_code < 300):
-                raise HTTPException(status_code=resp.status_code, detail=resp.text or f"Error en página {page}")
+        # anti-loop: cortar si el backend ignora ?page=
+        dig = sha1(repr(rows[:50]).encode("utf-8", "ignore")).hexdigest()
+        if last_digest is not None and dig == last_digest:
+            break
+        last_digest = dig
 
-            page_json = resp.json()
-            page_items_raw, page_meta = _json_items_or_list(page_json)
-            if not page_items_raw:
-                break
-
-            cur_digest = _digest_page(page_items_raw)
-            if prev_digest and cur_digest == prev_digest:
-                break
-            prev_digest = cur_digest
-
-            items_norm.extend(_parse_stock_rows(page_json))
-
-            hint = _has_next_page(page_meta, page=page)
-            if hint is False:
-                break
-            page += 1
-
-    # 3) Normalización robusta para armar salida y costos
-    #    Acepta variantes de clave y evita KeyError
-    def _get_disp(d: dict) -> float:
-        return _safe_float(d.get("Disponibilidad", d.get("disponibilidad", 0)) or 0)
-
-    def _get_nombre(d: dict) -> str:
-        return str(d.get("Producto", d.get("nombre", "")) or "")
-
-    def _get_medida(d: dict) -> str:
-        return str(d.get("Medida", d.get("medida", "")) or "")
-
-    def _get_costo_unit(d: dict, raw_row: dict | None = None) -> float:
-        # Preferir unitaryCost del row crudo si está
-        if raw_row is not None:
-            cu = _get_first(
-                raw_row,
-                "unitaryCost",
-                "cost.amount",
-                "unitCost",
-                "averageCost",
-                "avgCost",
-                "lastCost",
-                "productCost.amount",
-                "costAmount",
-                default=None,
-            )
-            if cu is not None:
-                return _safe_float(cu)
-        # Si no, toma lo que venga del ítem normalizado (si lo hubiésemos puesto)
-        return _safe_float(d.get("CostoUnitario", 0))
-
-    def _get_moneda(d: dict, raw_row: dict | None = None) -> str:
-        if raw_row is not None:
-            mon = _get_first(
-                raw_row,
-                "cost.codeCurrency",
-                "codeCurrency",
-                "currency",
-                "productCost.codeCurrency",
-                default=None,
-            )
-            if mon:
-                return str(mon)
-        # Fallback al toplevel costCurrency
-        if default_currency:
-            return str(default_currency)
-        return str(d.get("Moneda", "UNK"))
-
-    # Construimos un índice simple por (nombre, medida) para mergear costo/moneda
-    index_map: Dict[tuple, Dict[str, Any]] = {}
-    for it in items_norm:
-        key = (_get_nombre(it), _get_medida(it))
-        index_map[key] = {
-            "Producto": _get_nombre(it),
-            "Disponibilidad": _get_disp(it),
-            "Medida": _get_medida(it),
-            "CostoUnitario": 0.0,
-            "Moneda": default_currency or "UNK",
-        }
-
-    # Merge de costos/moneda desde el JSON crudo de la primera página
-    def _merge_costs_from_json(any_json):
-        # Tomamos filas reales (soporta envoltorio con "result")
-        rows = any_json["result"] if isinstance(any_json, dict) and isinstance(any_json.get("result"), list) else _first_list_of_dicts(any_json)
-        MEASURE_MAP = {
-            "UNIT": "unid",
-            "POUND": "lb",
-            "LITER": "L",
-            "KILOGRAM": "kg",
-        }
+        # 3) Normalizar SOLO los 3 campos pedidos (por PRODUCTO)
         for r in rows:
-            nombre = _get_first(
-                r, "productName", "product.name", "displayName", "variantName", "name",
-                "product.displayName", "product.variantName", default=None
-            ) or _get_first(r, "universalCode", "productId", default="SIN_NOMBRE")
+            name = r.get("productName") or r.get("name") or r.get("universalCode") or r.get("productId") or "SIN_NOMBRE"
 
-            medida_raw = _get_first(r, "measure", "measureShortName", "uom", "unit", default="") or ""
-            medida = MEASURE_MAP.get(str(medida_raw).upper(), str(medida_raw))
+            # cantidad: preferimos 'disponibility'; si faltara, intentamos sumar stocks[].quantity
+            disp = r.get("disponibility", None)
+            if disp is None:
+                stocks = r.get("stocks") or []
+                if isinstance(stocks, list):
+                    disp = sum(_safe_float(s.get("quantity", 0)) for s in stocks)
+                else:
+                    disp = 0.0
+            disp = _safe_float(disp)
+            if abs(disp) < ZERO_EPS:
+                disp = 0.0
 
-            key = (str(nombre), str(medida))
-            if key in index_map:
-                cu = _get_costo_unit(index_map[key], r)
-                mon = _get_moneda(index_map[key], r)
-                index_map[key]["CostoUnitario"] = cu
-                index_map[key]["Moneda"] = mon
+            # total_cost viene directo en el row (si no, queda 0)
+            tcost = _safe_float(r.get("total_cost", 0))
 
-    _merge_costs_from_json(first_json)
+            # Solo guardamos los productos con disponibilidad > 0 real
+            if disp > ZERO_EPS:
+                productos.append({
+                    "productName": str(name),
+                    "disponibility": disp,
+                    "total_cost": tcost,
+                })
 
-    # 4) Filtrar productos con disponibilidad > 0 (usando epsilon)
-    productos_filtrados = [
-        it for it in index_map.values()
-        if _safe_float(it.get("Disponibilidad", 0) or 0) > ZERO_EPS
-    ]
+        page += 1
 
-    # 5) Costo total por moneda
-    costos_por_moneda: Dict[str, float] = {}
-    for p in productos_filtrados:
-        disp = _safe_float(p.get("Disponibilidad", 0))
-        cu = _safe_float(p.get("CostoUnitario", 0))
-        mon = str(p.get("Moneda", default_currency or "UNK") or (default_currency or "UNK"))
-        costos_por_moneda[mon] = costos_por_moneda.get(mon, 0.0) + (disp * cu)
+    # 4) Resumen mínimo
+    disponibilidad_total = sum(_safe_float(p["disponibility"]) for p in productos)
+    costo_total = sum(_safe_float(p["total_cost"]) for p in productos)
 
-    costo_total = None
-    moneda_unica = None
-    if len(costos_por_moneda) == 1:
-        moneda_unica, costo_total = next(iter(costos_por_moneda.items()))
-
-    resultado: Dict[str, Any] = {
+    return {
         "status": "ok",
-        "total_items": len(productos_filtrados),
-        "costos_por_moneda": costos_por_moneda,
-        "productos": productos_filtrados,
+        "resumen": {
+            "items": len(productos),
+            "disponibilidad_total": disponibilidad_total,
+            "costo_total": costo_total,
+        },
+        "productos": productos,
     }
-    if costo_total is not None:
-        resultado["costo_total"] = costo_total
-        resultado["moneda"] = moneda_unica
 
-    # 6) Exportación y envío por correo (PDF con costo opcional)
-    if enviar_por_correo:
-        if not destinatario:
-            raise HTTPException(status_code=400, detail="Debe enviar 'destinatario' para el envío por correo.")
-
-        ahora = datetime.now().strftime("%Y-%m-%d_%H%M")
-        data_bytes = io.BytesIO()
-        mensaje_extra = None
-
-        if formato == "excel":
-            if OPENPYXL_AVAILABLE:
-                wb: Workbook = openpyxl.Workbook()
-                ws = wb.active
-                ws.title = "Disponibles"
-                ws.append(["Producto", "Disponibilidad", "Medida", "CostoUnitario", "Moneda"])
-                for p in productos_filtrados:
-                    ws.append([p["Producto"], p["Disponibilidad"], p["Medida"], p["CostoUnitario"], p["Moneda"]])
-                # Resumen
-                ws.append([])
-                ws.append(["total_items", len(productos_filtrados)])
-                if costo_total is not None:
-                    ws.append(["costo_total", costo_total, moneda_unica])
-                ws.append(["costos_por_moneda"])
-                for m, v in costos_por_moneda.items():
-                    ws.append([m, v])
-                wb.save(data_bytes)
-                data_bytes.seek(0)
-                nombre_archivo = f"inventario_disponibles_{ahora}.xlsx"
-                mime = ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            else:
-                buf = io.StringIO()
-                w = csv.writer(buf)
-                w.writerow(["Producto", "Disponibilidad", "Medida", "CostoUnitario", "Moneda"])
-                for p in productos_filtrados:
-                    w.writerow([p["Producto"], p["Disponibilidad"], p["Medida"], p["CostoUnitario"], p["Moneda"]])
-                w.writerow([])
-                w.writerow(["total_items", len(productos_filtrados)])
-                if costo_total is not None:
-                    w.writerow(["costo_total", costo_total, moneda_unica])
-                w.writerow(["costos_por_moneda"])
-                for m, v in costos_por_moneda.items():
-                    w.writerow([m, v])
-                data_bytes = io.BytesIO(buf.getvalue().encode("utf-8"))
-                nombre_archivo = f"inventario_disponibles_{ahora}.csv"
-                mime = ("text", "csv")
-                mensaje_extra = "openpyxl no instalado; se envía CSV."
-
-        elif formato == "pdf":
-            if not REPORTLAB_AVAILABLE:
-                # Fallback a Excel/CSV si falta reportlab
-                return totalizar_inventario(
-                    usuario=usuario,
-                    enviar_por_correo=True,
-                    destinatario=destinatario,
-                    formato="excel",
-                    incluir_costo_pdf=incluir_costo_pdf,
-                )
-
-            c = canvas.Canvas(data_bytes, pagesize=A4)
-            width, height = A4
-            y = height - 40
-            c.setFont("Helvetica-Bold", 12)
-            titulo = "Inventario – Disponibles (por producto)"
-            if not incluir_costo_pdf:
-                titulo += " – sin costos"
-            c.drawString(40, y, titulo); y -= 20
-            c.setFont("Helvetica", 10)
-            c.drawString(40, y, f"Generado: {datetime.now().isoformat(timespec='seconds')}"); y -= 30
-
-            # encabezados
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(40, y, "Producto")
-            c.drawString(300, y, "Disp.")
-            c.drawString(360, y, "Med.")
-            if incluir_costo_pdf:
-                c.drawString(420, y, "Costo")
-                c.drawString(480, y, "Mon.")
-            y -= 16
-            c.setFont("Helvetica", 10)
-
-            for p in productos_filtrados:
-                if y < 60:
-                    c.showPage(); y = height - 60; c.setFont("Helvetica", 10)
-                    c.setFont("Helvetica-Bold", 10)
-                    c.drawString(40, y, "Producto"); c.drawString(300, y, "Disp.")
-                    c.drawString(360, y, "Med.")
-                    if incluir_costo_pdf:
-                        c.drawString(420, y, "Costo"); c.drawString(480, y, "Mon.")
-                    y -= 16; c.setFont("Helvetica", 10)
-
-                c.drawString(40, y, str(p["Producto"])[:46])
-                c.drawRightString(340, y, f"{p['Disponibilidad']}")
-                c.drawString(360, y, str(p["Medida"])[:10])
-
-                if incluir_costo_pdf:
-                    c.drawRightString(470, y, f"{p['CostoUnitario']}")
-                    c.drawString(480, y, str(p["Moneda"])[:6])
-
-                y -= 12
-
-            # resumen
-            y -= 10; c.setFont("Helvetica-Bold", 10)
-            c.drawString(40, y, f"total_items: {len(productos_filtrados)}"); y -= 14
-            if incluir_costo_pdf:
-                if costo_total is not None:
-                    c.drawString(40, y, f"costo_total: {costo_total} {moneda_unica}"); y -= 14
-                c.drawString(40, y, "costos_por_moneda:")
-                y -= 14; c.setFont("Helvetica", 10)
-                for m, v in costos_por_moneda.items():
-                    if y < 50:
-                        c.showPage(); y = height - 50; c.setFont("Helvetica", 10)
-                    c.drawString(60, y, f"{m}: {v}")
-                    y -= 12
-
-            c.showPage(); c.save(); data_bytes.seek(0)
-            nombre_archivo = f"inventario_disponibles_{ahora}.pdf"
-            mime = ("application", "pdf")
-
-        else:
-            raise HTTPException(status_code=400, detail="Formato no soportado")
-
-        asunto = "Inventario – Disponibles (por producto)"
-        cuerpo = "Se adjunta el inventario solicitado (productos con disponibilidad > 0)."
-        if formato == "pdf":
-            cuerpo += f" (Costo {'incluido' if incluir_costo_pdf else 'no incluido'} en PDF)"
-
-        ok = enviar_correo(
-            destinatario=destinatario,
-            asunto=asunto,
-            cuerpo=cuerpo,
-            archivo_adjunto=data_bytes,
-            nombre_archivo=nombre_archivo,
-            tipo_mime=mime,
-        )
-        resultado["envio_correo"] = {
-            "solicitado": True,
-            "realizado": bool(ok),
-            "formato": formato,
-            "destinatario": destinatario,
-            "mensaje": "Correo enviado" if ok else "No se pudo enviar el correo",
-            "incluir_costo_pdf": incluir_costo_pdf,
-        }
-
-    return resultado
 
