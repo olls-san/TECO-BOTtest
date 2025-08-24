@@ -498,5 +498,133 @@ def totalizar_inventario(
         if not destinatario:
             raise HTTPException(status_code=400, detail="Debe enviar 'destinatario' para el envío por correo.")
 
-        ahora = datetime.now().strftime("%Y-%m-%d_%H%M_
+        ahora = datetime.now().strftime("%Y-%m-%d_%H%M")
+        mensaje_extra = None
+        data_bytes = io.BytesIO()
+
+        if formato == "excel":
+            if OPENPYXL_AVAILABLE:
+                wb: Workbook = openpyxl.Workbook()
+                ws = wb.active
+                if vista == "total":
+                    ws.title = "Total"
+                    ws.append(["Total global cantidad"])
+                    ws.append([total_global])
+                else:
+                    ws.title = "Inventario por almacén"
+                    ws.append(["Almacén", "Nombre", "Disponibilidad", "Medida"])
+                    for bloque in por_almacen:
+                        al = bloque["almacen"]
+                        for p in bloque["productos"]:
+                            ws.append([al, p["nombre"], p["disponibilidad"], p["medida"]])
+                wb.save(data_bytes)
+                data_bytes.seek(0)
+                nombre_archivo = f"inventario_{vista}_{ahora}.xlsx"
+                mime = ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            else:
+                buf = io.StringIO()
+                w = csv.writer(buf)
+                if vista == "total":
+                    w.writerow(["Total global cantidad"])
+                    w.writerow([total_global])
+                else:
+                    w.writerow(["Almacén", "Nombre", "Disponibilidad", "Medida"])
+                    for bloque in por_almacen:
+                        al = bloque["almacen"]
+                        for p in bloque["productos"]:
+                            w.writerow([al, p["nombre"], p["disponibilidad"], p["medida"]])
+                data_bytes = io.BytesIO(buf.getvalue().encode("utf-8"))
+                nombre_archivo = f"inventario_{vista}_{ahora}.csv"
+                mime = ("text", "csv")
+                mensaje_extra = "openpyxl no instalado; se envía CSV."
+
+        elif formato == "pdf":
+            if not REPORTLAB_AVAILABLE:
+                # Fallback a Excel/CSV si falta reportlab
+                if OPENPYXL_AVAILABLE:
+                    formato_alt = "excel"
+                else:
+                    formato_alt = "excel"  # se generará CSV de fallback
+                return totalizar_inventario(
+                    usuario=usuario,
+                    enviar_por_correo=True,
+                    destinatario=destinatario,
+                    formato=formato_alt,
+                    vista=vista,
+                )
+
+            c = canvas.Canvas(data_bytes, pagesize=A4)
+            width, height = A4
+            y = height - 40
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(40, y, "Totalizar Inventario")
+            y -= 20
+            c.setFont("Helvetica", 10)
+            c.drawString(40, y, f"Generado: {datetime.now().isoformat(timespec='seconds')}")
+            y -= 30
+
+            if vista == "total":
+                c.setFont("Helvetica-Bold", 11)
+                c.drawString(40, y, "Total global cantidad:")
+                c.setFont("Helvetica", 11)
+                c.drawString(220, y, f"{total_global}")
+                y -= 20
+            else:
+                c.setFont("Helvetica-Bold", 10)
+                c.drawString(40, y, "Almacén")
+                c.drawString(220, y, "Nombre")
+                c.drawString(420, y, "Disp.")
+                c.drawString(470, y, "Med.")
+                y -= 16
+                c.setFont("Helvetica", 10)
+                for bloque in por_almacen:
+                    if y < 70:
+                        c.showPage()
+                        y = height - 40
+                    c.setFont("Helvetica-Bold", 10)
+                    c.drawString(
+                        40,
+                        y,
+                        f"Almacén: {bloque['almacen'] or '—'}  (Total: {bloque['total_cantidad']})",
+                    )
+                    y -= 14
+                    c.setFont("Helvetica", 10)
+                    for p in bloque["productos"]:
+                        if y < 60:
+                            c.showPage()
+                            y = height - 60
+                            c.setFont("Helvetica", 10)
+                        c.drawString(40, y, (bloque["almacen"] or "—")[:22])
+                        c.drawString(220, y, p["nombre"][:36])
+                        c.drawRightString(460, y, f"{p['disponibilidad']}")
+                        c.drawString(470, y, p["medida"][:12])
+                        y -= 12
+                    y -= 6
+
+            c.showPage()
+            c.save()
+            data_bytes.seek(0)
+            nombre_archivo = f"inventario_{vista}_{ahora}.pdf"
+            mime = ("application", "pdf")
+
+        else:
+            raise HTTPException(status_code=400, detail="Formato no soportado")
+
+        asunto = "Totalizar inventario"
+        cuerpo = "Se adjunta el inventario solicitado."
+        if mensaje_extra:
+            cuerpo += f" Nota: {mensaje_extra}"
+
+        ok = enviar_correo(
+            destinatario=destinatario,
+            asunto=asunto,
+            cuerpo=cuerpo,
+            archivo_adjunto=data_bytes,
+            nombre_archivo=nombre_archivo,
+            tipo_mime=mime,
+        )
+        resultado["envio_correo"]["realizado"] = bool(ok)
+        resultado["envio_correo"]["mensaje"] = "Correo enviado" if ok else "No se pudo enviar el correo"
+
+    return resultado
 
