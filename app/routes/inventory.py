@@ -409,12 +409,15 @@ def totalizar_inventario(
     enviar_por_correo: bool = False,
     destinatario: Optional[str] = None,
     formato: Literal["excel", "pdf"] = "excel",
-    vista: Literal["total", "almacen"] = "total",
+    incluir_costo_pdf: bool = False,  # << NUEVO: solo afecta al PDF
 ):
     """
-    - Si el endpoint NO pagina: hace una sola llamada.
-    - Si pagina: itera de forma segura hasta agotar páginas o detectar repetición.
-    - 'vista=total' -> solo total global; 'vista=almacen' -> agrupado por almacén.
+    ÚNICA VISTA: 'disponibles'
+    - Lista productos con disponibilidad > 0 (Producto, Disponibilidad, Medida, CostoUnitario, Moneda)
+    - Resumen: total_items y costo_total (por moneda; si solo hay una moneda, también plano)
+    - Autodetección de paginación (sin loops).
+    - Sin redondeos: se retornan floats tal cual.
+    - NOTA: 'incluir_costo_pdf' controla SOLO el render del PDF; JSON/Excel/CSV incluyen costo siempre.
     """
 
     # 1) Autenticación + headers
@@ -435,15 +438,15 @@ def totalizar_inventario(
     if not (200 <= first.status_code < 300):
         raise HTTPException(status_code=first.status_code, detail=first.text or "No se pudo obtener inventario")
 
-    first_items_raw, first_meta = _json_items_or_list(first.json())
-    items_norm: List[Dict[str, Any]] = []
-    items_norm.extend(_parse_stock_rows(first_items_raw))
+    first_json = first.json()
+    first_items_raw, first_meta = _json_items_or_list(first_json)
+
+    # Parseo base (nombre, disponibilidad, medida, almacén)
+    items_norm: List[Dict[str, Any]] = _parse_stock_rows(first_items_raw)
 
     # ¿Backend indica que hay siguiente página?
     next_hint = _has_next_page(first_meta, page=1)
-
     if next_hint is True:
-        # Itera con guardas anti-loop
         max_pages = 1000
         prev_digest = _digest_page(first_items_raw)
         page = 2
@@ -456,13 +459,13 @@ def totalizar_inventario(
             if not (200 <= resp.status_code < 300):
                 raise HTTPException(status_code=resp.status_code, detail=resp.text or f"Error en página {page}")
 
-            page_items_raw, page_meta = _json_items_or_list(resp.json())
+            page_json = resp.json()
+            page_items_raw, page_meta = _json_items_or_list(page_json)
             if not page_items_raw:
                 break
 
             cur_digest = _digest_page(page_items_raw)
             if prev_digest and cur_digest == prev_digest:
-                # contenido repetido -> rompemos
                 break
             prev_digest = cur_digest
 
@@ -473,147 +476,217 @@ def totalizar_inventario(
                 break
             page += 1
 
-    # Si next_hint es False o None => asumimos sin paginación adicional
-    # y continuamos con lo ya obtenido.
+    # 3) Enriquecer con costo unitario y moneda (para cálculos/Excel/CSV)
+    def _index_key(it: Dict[str, Any]) -> tuple:
+        return (it.get("nombre"), it.get("medida"), it.get("almacen"))
 
-    # 3) Totales / vistas
-    total_global, por_almacen = _agrupar_por_almacen(items_norm)
+    index_map: Dict[tuple, Dict[str, Any]] = {}
+    for it in items_norm:
+        index_map[_index_key(it)] = {
+            "Producto": it["nombre"],
+            "Disponibilidad": it.get("disponibilidad", 0),
+            "Medida": it.get("medida", ""),
+            "CostoUnitario": 0.0,
+            "Moneda": "UNK",
+        }
+
+    def _extraer_costo_y_moneda(row: dict) -> tuple[float, str]:
+        costo_unit = _safe_float(_get_first(
+            row,
+            "cost.amount",
+            "unitCost",
+            "averageCost",
+            "avgCost",
+            "lastCost",
+            "productCost.amount",
+            "costAmount",
+            default=0,
+        ))
+        moneda = _get_first(
+            row,
+            "cost.codeCurrency",
+            "codeCurrency",
+            "currency",
+            "productCost.codeCurrency",
+            default="UNK",
+        ) or "UNK"
+        return costo_unit, str(moneda)
+
+    def _merge_costs_from_json(any_json):
+        rows = _first_list_of_dicts(any_json)
+        for r in rows:
+            nombre = _get_first(
+                r,
+                "productName", "product.name", "product.shortName",
+                "displayName", "variantName", "name",
+                "product.displayName", "product.variantName",
+                default=None,
+            ) or _get_first(r, "product.code", "product.barCode", "code", "barCode", default="SIN_NOMBRE")
+            medida = _get_first(
+                r,
+                "measureShortName", "measure", "uom", "unit",
+                "product.measureShortName", "product.measure", "product.uom",
+                default="",
+            )
+            almacen = _get_first(r, "stockName", "warehouseName", "areaName", "storeName", default="")
+            key = (str(nombre), str(medida), str(almacen))
+            if key in index_map:
+                cu, mon = _extraer_costo_y_moneda(r)
+                if cu or mon != "UNK":
+                    index_map[key]["CostoUnitario"] = cu
+                    index_map[key]["Moneda"] = mon
+
+    _merge_costs_from_json(first_json)
+
+    # 4) Filtrar productos con disponibilidad > 0 (sin redondeo)
+    productos_filtrados = [
+        it for it in index_map.values()
+        if _safe_float(it.get("Disponibilidad", 0) or 0) > 0
+    ]
+
+    # 5) Costo total por moneda
+    costos_por_moneda: Dict[str, float] = {}
+    for p in productos_filtrados:
+        disp = _safe_float(p["Disponibilidad"])
+        cu = _safe_float(p.get("CostoUnitario", 0))
+        mon = str(p.get("Moneda") or "UNK")
+        costos_por_moneda[mon] = costos_por_moneda.get(mon, 0.0) + (disp * cu)
+
+    costo_total = None
+    moneda_unica = None
+    if len(costos_por_moneda) == 1:
+        moneda_unica, costo_total = next(iter(costos_por_moneda.items()))
+
     resultado: Dict[str, Any] = {
         "status": "ok",
-        "total_items": len(items_norm) if vista == "total" else sum(len(x["productos"]) for x in por_almacen),
-        "total_global_cantidad": total_global,
-        "envio_correo": {
-            "solicitado": bool(enviar_por_correo),
-            "realizado": False,
-            "formato": formato,
-            "destinatario": destinatario or None,
-            "mensaje": None,
-        },
+        "total_items": len(productos_filtrados),
+        "costos_por_moneda": costos_por_moneda,
+        "productos": productos_filtrados,
     }
-    if vista == "almacen":
-        resultado["por_almacen"] = por_almacen
+    if costo_total is not None:
+        resultado["costo_total"] = costo_total
+        resultado["moneda"] = moneda_unica
 
-    # 4) Exportación y envío opcional por correo
+    # 6) Exportación y envío por correo
     if enviar_por_correo:
         if not destinatario:
             raise HTTPException(status_code=400, detail="Debe enviar 'destinatario' para el envío por correo.")
 
         ahora = datetime.now().strftime("%Y-%m-%d_%H%M")
-        mensaje_extra = None
         data_bytes = io.BytesIO()
+        mensaje_extra = None
 
         if formato == "excel":
             if OPENPYXL_AVAILABLE:
                 wb: Workbook = openpyxl.Workbook()
                 ws = wb.active
-                if vista == "total":
-                    ws.title = "Total"
-                    ws.append(["Total global cantidad"])
-                    ws.append([total_global])
-                else:
-                    ws.title = "Inventario por almacén"
-                    ws.append(["Almacén", "Nombre", "Disponibilidad", "Medida"])
-                    for bloque in por_almacen:
-                        al = bloque["almacen"]
-                        for p in bloque["productos"]:
-                            ws.append([al, p["nombre"], p["disponibilidad"], p["medida"]])
+                ws.title = "Disponibles"
+                ws.append(["Producto", "Disponibilidad", "Medida", "CostoUnitario", "Moneda"])
+                for p in productos_filtrados:
+                    ws.append([p["Producto"], p["Disponibilidad"], p["Medida"], p["CostoUnitario"], p["Moneda"]])
+                # Resumen
+                ws.append([])
+                ws.append(["total_items", len(productos_filtrados)])
+                if costo_total is not None:
+                    ws.append(["costo_total", costo_total, moneda_unica])
+                ws.append(["costos_por_moneda"])
+                for m, v in costos_por_moneda.items():
+                    ws.append([m, v])
                 wb.save(data_bytes)
                 data_bytes.seek(0)
-                nombre_archivo = f"inventario_{vista}_{ahora}.xlsx"
+                nombre_archivo = f"inventario_disponibles_{ahora}.xlsx"
                 mime = ("application", "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             else:
                 buf = io.StringIO()
                 w = csv.writer(buf)
-                if vista == "total":
-                    w.writerow(["Total global cantidad"])
-                    w.writerow([total_global])
-                else:
-                    w.writerow(["Almacén", "Nombre", "Disponibilidad", "Medida"])
-                    for bloque in por_almacen:
-                        al = bloque["almacen"]
-                        for p in bloque["productos"]:
-                            w.writerow([al, p["nombre"], p["disponibilidad"], p["medida"]])
+                w.writerow(["Producto", "Disponibilidad", "Medida", "CostoUnitario", "Moneda"])
+                for p in productos_filtrados:
+                    w.writerow([p["Producto"], p["Disponibilidad"], p["Medida"], p["CostoUnitario"], p["Moneda"]])
+                w.writerow([])
+                w.writerow(["total_items", len(productos_filtrados)])
+                if costo_total is not None:
+                    w.writerow(["costo_total", costo_total, moneda_unica])
+                w.writerow(["costos_por_moneda"])
+                for m, v in costos_por_moneda.items():
+                    w.writerow([m, v])
                 data_bytes = io.BytesIO(buf.getvalue().encode("utf-8"))
-                nombre_archivo = f"inventario_{vista}_{ahora}.csv"
+                nombre_archivo = f"inventario_disponibles_{ahora}.csv"
                 mime = ("text", "csv")
                 mensaje_extra = "openpyxl no instalado; se envía CSV."
 
         elif formato == "pdf":
             if not REPORTLAB_AVAILABLE:
-                # Fallback a Excel/CSV si falta reportlab
-                if OPENPYXL_AVAILABLE:
-                    formato_alt = "excel"
-                else:
-                    formato_alt = "excel"  # se generará CSV de fallback
                 return totalizar_inventario(
                     usuario=usuario,
                     enviar_por_correo=True,
                     destinatario=destinatario,
-                    formato=formato_alt,
-                    vista=vista,
+                    formato="excel",
                 )
 
             c = canvas.Canvas(data_bytes, pagesize=A4)
             width, height = A4
             y = height - 40
             c.setFont("Helvetica-Bold", 12)
-            c.drawString(40, y, "Totalizar Inventario")
-            y -= 20
+            c.drawString(40, y, "Inventario – Disponibles"); y -= 20
             c.setFont("Helvetica", 10)
-            c.drawString(40, y, f"Generado: {datetime.now().isoformat(timespec='seconds')}")
-            y -= 30
+            c.drawString(40, y, f"Generado: {datetime.now().isoformat(timespec='seconds')}"); y -= 30
 
-            if vista == "total":
-                c.setFont("Helvetica-Bold", 11)
-                c.drawString(40, y, "Total global cantidad:")
-                c.setFont("Helvetica", 11)
-                c.drawString(220, y, f"{total_global}")
-                y -= 20
-            else:
-                c.setFont("Helvetica-Bold", 10)
-                c.drawString(40, y, "Almacén")
-                c.drawString(220, y, "Nombre")
-                c.drawString(420, y, "Disp.")
-                c.drawString(470, y, "Med.")
-                y -= 16
-                c.setFont("Helvetica", 10)
-                for bloque in por_almacen:
-                    if y < 70:
-                        c.showPage()
-                        y = height - 40
+            # encabezados según flag
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(40, y, "Producto")
+            c.drawString(300, y, "Disp.")
+            c.drawString(360, y, "Med.")
+            if incluir_costo_pdf:
+                c.drawString(420, y, "Costo")
+                c.drawString(480, y, "Mon.")
+            y -= 16
+            c.setFont("Helvetica", 10)
+
+            for p in productos_filtrados:
+                if y < 60:
+                    c.showPage(); y = height - 60; c.setFont("Helvetica", 10)
                     c.setFont("Helvetica-Bold", 10)
-                    c.drawString(
-                        40,
-                        y,
-                        f"Almacén: {bloque['almacen'] or '—'}  (Total: {bloque['total_cantidad']})",
-                    )
-                    y -= 14
-                    c.setFont("Helvetica", 10)
-                    for p in bloque["productos"]:
-                        if y < 60:
-                            c.showPage()
-                            y = height - 60
-                            c.setFont("Helvetica", 10)
-                        c.drawString(40, y, (bloque["almacen"] or "—")[:22])
-                        c.drawString(220, y, p["nombre"][:36])
-                        c.drawRightString(460, y, f"{p['disponibilidad']}")
-                        c.drawString(470, y, p["medida"][:12])
-                        y -= 12
-                    y -= 6
+                    c.drawString(40, y, "Producto"); c.drawString(300, y, "Disp.")
+                    c.drawString(360, y, "Med.")
+                    if incluir_costo_pdf:
+                        c.drawString(420, y, "Costo"); c.drawString(480, y, "Mon.")
+                    y -= 16; c.setFont("Helvetica", 10)
 
-            c.showPage()
-            c.save()
-            data_bytes.seek(0)
-            nombre_archivo = f"inventario_{vista}_{ahora}.pdf"
+                c.drawString(40, y, str(p["Producto"])[:46])
+                c.drawRightString(340, y, f"{p['Disponibilidad']}")
+                c.drawString(360, y, str(p["Medida"])[:10])
+
+                if incluir_costo_pdf:
+                    c.drawRightString(470, y, f"{p['CostoUnitario']}")
+                    c.drawString(480, y, str(p["Moneda"])[:6])
+
+                y -= 12
+
+            # resumen al final
+            y -= 10; c.setFont("Helvetica-Bold", 10)
+            c.drawString(40, y, f"total_items: {len(productos_filtrados)}"); y -= 14
+            if incluir_costo_pdf:
+                if costo_total is not None:
+                    c.drawString(40, y, f"costo_total: {costo_total} {moneda_unica}"); y -= 14
+                c.drawString(40, y, "costos_por_moneda:")
+                y -= 14; c.setFont("Helvetica", 10)
+                for m, v in costos_por_moneda.items():
+                    if y < 50:
+                        c.showPage(); y = height - 50; c.setFont("Helvetica", 10)
+                    c.drawString(60, y, f"{m}: {v}")
+                    y -= 12
+
+            c.showPage(); c.save(); data_bytes.seek(0)
+            nombre_archivo = f"inventario_disponibles_{ahora}.pdf"
             mime = ("application", "pdf")
 
         else:
             raise HTTPException(status_code=400, detail="Formato no soportado")
 
-        asunto = "Totalizar inventario"
-        cuerpo = "Se adjunta el inventario solicitado."
-        if mensaje_extra:
-            cuerpo += f" Nota: {mensaje_extra}"
+        asunto = "Inventario – Disponibles"
+        cuerpo = "Se adjunta el inventario solicitado (productos con disponibilidad > 0)."
+        if formato == "pdf":
+            cuerpo += f" (Costo {'incluido' if incluir_costo_pdf else 'no incluido'} en PDF)"
 
         ok = enviar_correo(
             destinatario=destinatario,
@@ -623,8 +696,15 @@ def totalizar_inventario(
             nombre_archivo=nombre_archivo,
             tipo_mime=mime,
         )
-        resultado["envio_correo"]["realizado"] = bool(ok)
-        resultado["envio_correo"]["mensaje"] = "Correo enviado" if ok else "No se pudo enviar el correo"
+        resultado["envio_correo"] = {
+            "solicitado": True,
+            "realizado": bool(ok),
+            "formato": formato,
+            "destinatario": destinatario,
+            "mensaje": "Correo enviado" if ok else "No se pudo enviar el correo",
+            "incluir_costo_pdf": incluir_costo_pdf,
+        }
 
     return resultado
+
 
