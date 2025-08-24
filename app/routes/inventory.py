@@ -101,78 +101,62 @@ def _safe_float(x) -> float:
 # =========================
 # Helpers de inventario
 # =========================
+# Trata como 0 cualquier cantidad |x| < ZERO_EPS (evita "casi ceros" tipo 7.1e-15)
+ZERO_EPS = 1e-6
 
 def _parse_stock_rows(raw_json: dict | list) -> List[Dict[str, Any]]:
     """
-    Normaliza la respuesta del endpoint stock/disponibility a:
-    { nombre, disponibilidad, medida, almacen }
+    Normaliza la respuesta de /report/stock/disponibility a REGISTROS POR PRODUCTO.
+    - Lee 'result' si existe (estructura del backend mostrada).
+    - Usa 'disponibility' como cantidad (si falta, cae a suma de stocks[].quantity).
+    - Aplica ZERO_EPS para convertir "casi ceros" a 0.
+    - Devuelve campos estándar usados por el endpoint: nombre, disponibilidad, medida, almacen="".
     """
-    rows = _first_list_of_dicts(raw_json)
+    # 1) Detecta la lista real de filas
+    if isinstance(raw_json, dict) and isinstance(raw_json.get("result"), list):
+        rows = raw_json["result"]
+    else:
+        rows = _first_list_of_dicts(raw_json)
+
     items: List[Dict[str, Any]] = []
+
+    # Mapeo opcional de medidas "técnicas" a legibles
+    MEASURE_MAP = {
+        "UNIT": "unid",
+        "POUND": "lb",
+        "LITER": "L",
+        "KILOGRAM": "kg",
+    }
+
     for row in rows:
+        # nombre del producto
         nombre = _get_first(
             row,
-            "productName",
-            "product.name",
-            "product.shortName",
-            "displayName",
-            "variantName",
-            "name",
-            "product.displayName",
-            "product.variantName",
+            "productName", "product.name", "displayName", "variantName", "name",
+            "product.displayName", "product.variantName",
             default=None,
-        )
-        if not nombre:
-            nombre = _get_first(
-                row,
-                "product.code",
-                "product.barCode",
-                "code",
-                "barCode",
-                default="SIN_NOMBRE",
-            )
+        ) or _get_first(row, "universalCode", "productId", default="SIN_NOMBRE")
 
-        cantidad = _get_first(
-            row,
-            "available",
-            "quantity",
-            "stock",
-            "totalAvailable",
-            "availableQuantity",
-            "product.available",
-            default=0,
-        )
+        # cantidad: preferimos 'disponibility'; si no está, sumamos stocks[].quantity
+        cantidad = row.get("disponibility", None)
+        if cantidad is None:
+            cantidad = sum(_safe_float(s.get("quantity", 0)) for s in (row.get("stocks") or []) )
         cantidad = _safe_float(cantidad)
+        if abs(cantidad) < ZERO_EPS:
+            cantidad = 0.0
 
-        medida = _get_first(
-            row,
-            "measureShortName",
-            "measure",
-            "uom",
-            "unit",
-            "product.measureShortName",
-            "product.measure",
-            "product.uom",
-            default="",
-        )
+        # medida legible
+        medida_raw = _get_first(row, "measure", "measureShortName", "uom", "unit", default="") or ""
+        medida = MEASURE_MAP.get(str(medida_raw).upper(), str(medida_raw))
 
-        almacen = _get_first(
-            row,
-            "stockName",
-            "warehouseName",
-            "areaName",
-            "storeName",
-            default="",
-        )
+        # Registro por PRODUCTO (no por almacén)
+        items.append({
+            "nombre": str(nombre),
+            "disponibilidad": cantidad,
+            "medida": medida,
+            "almacen": "",  # vacío porque estamos agregando por producto
+        })
 
-        items.append(
-            {
-                "nombre": str(nombre),
-                "disponibilidad": cantidad,
-                "medida": str(medida),
-                "almacen": str(almacen),
-            }
-        )
     return items
 
 
@@ -540,8 +524,8 @@ def totalizar_inventario(
 
     # 4) Filtrar productos con disponibilidad > 0 (sin redondeo)
     productos_filtrados = [
-        it for it in index_map.values()
-        if _safe_float(it.get("Disponibilidad", 0) or 0) > 0
+        it for it in items_norm
+        if _safe_float(it.get("disponibilidad", 0) or 0) > ZERO_EPS
     ]
 
     # 5) Costo total por moneda
