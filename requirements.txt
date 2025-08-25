@@ -15,4 +15,9 @@ reportlab==4.2.5
 # Subida de archivos/form-data
 python-multipart==0.0.9
 
-
+requests
+matplotlib
+pandas
+httpx
+reportlab>=4.0.0
+xlsxwriter
