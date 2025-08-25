@@ -15,7 +15,7 @@ from datetime import datetime
 import io
 import csv
 from hashlib import sha1
-
+from fastapi import Query
 from fastapi import APIRouter, HTTPException
 from app.core.http_sync import teco_request
 
@@ -388,12 +388,19 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
 # =========================
 
 @router.get("/totalizar-inventario")
-def totalizar_inventario(usuario: str):
+def totalizar_inventario(
+    usuario: str,
+    enviar_por_correo: bool = Query(False, description="Si es true, genera y envía un archivo al correo indicado."),
+    destinatario: Optional[str] = Query(None, description="Correo destino; obligatorio si enviar_por_correo=true."),
+    formato: Literal["pdf", "excel"] = Query("pdf", description="Formato del archivo si se envía por correo."),
+):
     """
     Respuesta mínima por PRODUCTO:
       - productos[]: [{ productName, disponibility, total_cost }]
       - resumen: { items, disponibilidad_total, costo_total }
-    Sin vistas por almacén ni exportaciones para evitar 'response too large'.
+
+    Envío opcional por correo (PDF/Excel) SOLO si enviar_por_correo=true y se indica 'destinatario'.
+    Regla: El archivo (PDF o Excel) se genera SIN costos; contiene solo cantidades generales.
     """
     # 1) Autenticación + headers
     ctx = user_context.get(usuario)
@@ -403,13 +410,12 @@ def totalizar_inventario(usuario: str):
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
 
     url = f"{base_url}/api/v1/report/stock/disponibility"
-
     productos: List[Dict[str, Any]] = []
 
-    # 2) Traer páginas de forma segura (si aplica)
+    # 2) Paginación segura
     page = 1
     last_digest: Optional[str] = None
-    MAX_PAGES = 1000  # guarda extra
+    MAX_PAGES = 1000
 
     while page <= MAX_PAGES:
         try:
@@ -422,12 +428,12 @@ def totalizar_inventario(usuario: str):
 
         js = resp.json()
 
-        # Soportar estructura con { result: [...] }
+        # Soporta estructura con { result: [...] }
         rows = js["result"] if isinstance(js, dict) and isinstance(js.get("result"), list) else _first_list_of_dicts(js)
         if not rows:
             break
 
-        # anti-loop: cortar si el backend ignora ?page=
+        # Anti-loop: cortar si el backend ignora ?page=
         dig = sha1(repr(rows[:50]).encode("utf-8", "ignore")).hexdigest()
         if last_digest is not None and dig == last_digest:
             break
@@ -437,7 +443,7 @@ def totalizar_inventario(usuario: str):
         for r in rows:
             name = r.get("productName") or r.get("name") or r.get("universalCode") or r.get("productId") or "SIN_NOMBRE"
 
-            # cantidad: preferimos 'disponibility'; si faltara, intentamos sumar stocks[].quantity
+            # cantidad: preferimos 'disponibility'; si falta, sumamos stocks[].quantity
             disp = r.get("disponibility", None)
             if disp is None:
                 stocks = r.get("stocks") or []
@@ -449,10 +455,10 @@ def totalizar_inventario(usuario: str):
             if abs(disp) < ZERO_EPS:
                 disp = 0.0
 
-            # total_cost viene directo en el row (si no, queda 0)
+            # total_cost puede venir (para el JSON), pero NO se usa en archivos
             tcost = _safe_float(r.get("total_cost", 0))
 
-            # Solo guardamos los productos con disponibilidad > 0 real
+            # Guardar solo productos con disponibilidad > 0 real
             if disp > ZERO_EPS:
                 productos.append({
                     "productName": str(name),
@@ -462,11 +468,11 @@ def totalizar_inventario(usuario: str):
 
         page += 1
 
-    # 4) Resumen mínimo
+    # 4) Resumen mínimo (el JSON mantiene costo_total; los archivos NO lo muestran)
     disponibilidad_total = sum(_safe_float(p["disponibility"]) for p in productos)
     costo_total = sum(_safe_float(p["total_cost"]) for p in productos)
 
-    return {
+    payload = {
         "status": "ok",
         "resumen": {
             "items": len(productos),
@@ -475,5 +481,105 @@ def totalizar_inventario(usuario: str):
         },
         "productos": productos,
     }
+
+    # 5) Envío opcional por correo (nunca usar el correo del usuario logueado por defecto)
+    if enviar_por_correo:
+        if not destinatario:
+            raise HTTPException(status_code=400, detail="destinatario es obligatorio cuando enviar_por_correo=true")
+
+        try:
+            if formato == "pdf":
+                data_bytes, filename, mime = _generar_pdf_sin_costos(productos, payload)
+            else:
+                data_bytes, filename, mime = _generar_excel_sin_costos(productos, payload)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"No se pudo generar el archivo: {e}")
+
+        try:
+            enviar_correo(
+                to_email=destinatario,
+                subject="Totalizar inventario",
+                body_text="Adjunto el reporte solicitado (sin costos, solo cantidades generales).",
+                attachment=(data_bytes, filename, mime),
+            )
+            payload["archivo_enviado"] = {
+                "nombre": filename,
+                "formato": formato,
+                "destinatario": destinatario,
+                "fecha_envio": datetime.utcnow().isoformat() + "Z",
+            }
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"No se pudo enviar el correo: {e}")
+
+    return payload
+
+def _generar_pdf_sin_costos(productos, payload):
+    """
+    Genera un PDF SIN costos (solo producto y disponibilidad + resumen de cantidades).
+    Requiere REPORTLAB_AVAILABLE=True.
+    """
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab no está disponible para generar PDF.")
+    import io
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+    y = h - 50
+
+    c.drawString(40, y, "Totalizar Inventario (sin costos)"); y -= 20
+    c.drawString(40, y, f"Items: {payload['resumen']['items']}"); y -= 20
+    c.drawString(40, y, f"Disponibilidad Total: {payload['resumen']['disponibilidad_total']}"); y -= 30
+
+    # Encabezado sin costos
+    c.drawString(40, y, "Producto | Disponibilidad"); y -= 18
+
+    # Limitar filas para evitar PDFs gigantes
+    for p in productos[:1000]:
+        line = f"{p['productName']} | {p['disponibility']}"
+        c.drawString(40, y, line); y -= 14
+        if y < 60:
+            c.showPage(); y = h - 50
+
+    c.save()
+    buf.seek(0)
+    return buf.read(), "totalizar-inventario.pdf", "application/pdf"
+
+
+def _generar_excel_sin_costos(productos, payload):
+    """
+    Genera un Excel SIN costos:
+      - Hoja 'Inventario' con columnas: Producto, Disponibilidad
+      - Hoja 'Resumen' con Items y Disponibilidad Total (sin costo total)
+    Requiere OPENPYXL_AVAILABLE=True.
+    """
+    if not OPENPYXL_AVAILABLE:
+        raise RuntimeError("openpyxl no está disponible para generar Excel.")
+    import io
+    from openpyxl import Workbook
+
+    wb = Workbook()
+
+    # Hoja detalle
+    ws = wb.active
+    ws.title = "Inventario"
+    ws.append(["Producto", "Disponibilidad"])
+    for p in productos:
+        ws.append([p["productName"], p["disponibility"]])
+
+    # Hoja resumen (sin costos)
+    ws2 = wb.create_sheet("Resumen")
+    ws2.append(["Items", "Disponibilidad Total"])
+    ws2.append([
+        payload["resumen"]["items"],
+        payload["resumen"]["disponibilidad_total"],
+    ])
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio.read(), "totalizar-inventario.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
