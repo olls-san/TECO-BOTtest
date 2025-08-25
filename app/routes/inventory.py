@@ -390,17 +390,22 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
 @router.get("/totalizar-inventario")
 def totalizar_inventario(
     usuario: str,
+    # Control de envío por correo
     enviar_por_correo: bool = Query(False, description="Si es true, genera y envía un archivo al correo indicado."),
     destinatario: Optional[str] = Query(None, description="Correo destino; obligatorio si enviar_por_correo=true."),
     formato: Literal["pdf", "excel"] = Query("pdf", description="Formato del archivo si se envía por correo."),
+    # Control de tamaño del JSON de respuesta
+    incluir_productos: bool = Query(False, description="Si es true, incluye la lista de productos en el JSON."),
+    max_items_json: int = Query(500, ge=0, le=10000, description="Máximo de productos a incluir en el JSON si incluir_productos=true."),
 ):
     """
     Respuesta mínima por PRODUCTO:
-      - productos[]: [{ productName, disponibility, total_cost }]
-      - resumen: { items, disponibilidad_total, costo_total }
-
-    Envío opcional por correo (PDF/Excel) SOLO si enviar_por_correo=true y se indica 'destinatario'.
-    Regla: El archivo (PDF o Excel) se genera SIN costos; contiene solo cantidades generales.
+      - productos[]: [{ productName, disponibility, total_cost }]  (opcional en JSON)
+      - resumen: { items, disponibilidad_total, costo_total }      (siempre)
+    Reglas:
+      - PDF/Excel enviados por correo NO incluyen costos (solo cantidades generales).
+      - Para evitar 'response too large', por defecto el JSON NO incluye productos.
+        Usa ?incluir_productos=true&max_items_json=N para incluir hasta N filas.
     """
     # 1) Autenticación + headers
     ctx = user_context.get(usuario)
@@ -410,12 +415,17 @@ def totalizar_inventario(
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
 
     url = f"{base_url}/api/v1/report/stock/disponibility"
+
     productos: List[Dict[str, Any]] = []
 
     # 2) Paginación segura
     page = 1
     last_digest: Optional[str] = None
     MAX_PAGES = 1000
+
+    total_items_contados = 0
+    suma_disponibilidad = 0.0
+    suma_total_cost = 0.0
 
     while page <= MAX_PAGES:
         try:
@@ -455,32 +465,46 @@ def totalizar_inventario(
             if abs(disp) < ZERO_EPS:
                 disp = 0.0
 
-            # total_cost puede venir (para el JSON), pero NO se usa en archivos
+            # total_cost (para JSON; nunca se imprime en PDF/Excel)
             tcost = _safe_float(r.get("total_cost", 0))
 
             # Guardar solo productos con disponibilidad > 0 real
             if disp > ZERO_EPS:
-                productos.append({
-                    "productName": str(name),
-                    "disponibility": disp,
-                    "total_cost": tcost,
-                })
+                total_items_contados += 1
+                suma_disponibilidad += disp
+                suma_total_cost += tcost
+
+                # Solo acumulamos en la lista si luego el JSON lo va a devolver
+                if incluir_productos and len(productos) < max_items_json:
+                    productos.append({
+                        "productName": str(name),
+                        "disponibility": disp,
+                        "total_cost": tcost,
+                    })
 
         page += 1
 
-    # 4) Resumen mínimo (el JSON mantiene costo_total; los archivos NO lo muestran)
-    disponibilidad_total = sum(_safe_float(p["disponibility"]) for p in productos)
-    costo_total = sum(_safe_float(p["total_cost"]) for p in productos)
-
+    # 4) Resumen (el JSON mantiene costo_total; los archivos NO lo muestran)
     payload = {
         "status": "ok",
         "resumen": {
-            "items": len(productos),
-            "disponibilidad_total": disponibilidad_total,
-            "costo_total": costo_total,
+            "items": total_items_contados,
+            "disponibilidad_total": round(suma_disponibilidad, 6),
+            "costo_total": round(suma_total_cost, 6),
         },
-        "productos": productos,
+        # Si incluir_productos=false, devolvemos lista vacía para no exceder tamaño
+        "productos": productos if incluir_productos else [],
     }
+
+    # Metadatos si truncamos la lista en el JSON
+    if incluir_productos and total_items_contados > len(productos):
+        payload["meta"] = {
+            "productos_incluidos_en_json": len(productos),
+            "productos_totales": total_items_contados,
+            "truncado": True,
+            "max_items_json": max_items_json,
+            "nota": "Para el archivo enviado por correo se incluirán todos los productos.",
+        }
 
     # 5) Envío opcional por correo (nunca usar el correo del usuario logueado por defecto)
     if enviar_por_correo:
@@ -489,9 +513,11 @@ def totalizar_inventario(
 
         try:
             if formato == "pdf":
-                data_bytes, filename, mime = _generar_pdf_sin_costos(productos, payload)
+                # PDF **sin costos** SIEMPRE (regla del negocio)
+                data_bytes, filename, mime = _generar_pdf_sin_costos_cantidades(productos_full_needed=True, usuario=usuario)
             else:
-                data_bytes, filename, mime = _generar_excel_sin_costos(productos, payload)
+                # Excel **sin costos** (solo cantidades generales)
+                data_bytes, filename, mime = _generar_excel_sin_costos_cantidades(productos_full_needed=True, usuario=usuario)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"No se pudo generar el archivo: {e}")
 
@@ -513,16 +539,55 @@ def totalizar_inventario(
 
     return payload
 
-def _generar_pdf_sin_costos(productos, payload):
+def _recopilar_productos_completos(usuario: str) -> List[Dict[str, Any]]:
+    """Lee TODO el inventario disponible (>0) solo con productName y disponibility."""
+    ctx = user_context.get(usuario)
+    if not ctx:
+        raise RuntimeError("Usuario no autenticado en recopilación")
+    base_url = get_base_url(ctx["region"])
+    headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+    url = f"{base_url}/api/v1/report/stock/disponibility"
+
+    productos_full: List[Dict[str, Any]] = []
+    page, last_digest = 1, None
+    while page <= 1000:
+        resp = teco_request("GET", url, headers=headers, params={"page": page})
+        if not (200 <= resp.status_code < 300):
+            raise RuntimeError(f"Error recopilando inventario (página {page}): {resp.text}")
+        js = resp.json()
+        rows = js["result"] if isinstance(js, dict) and isinstance(js.get("result"), list) else _first_list_of_dicts(js)
+        if not rows:
+            break
+        dig = sha1(repr(rows[:50]).encode("utf-8", "ignore")).hexdigest()
+        if last_digest is not None and dig == last_digest:
+            break
+        last_digest = dig
+        for r in rows:
+            name = r.get("productName") or r.get("name") or r.get("universalCode") or r.get("productId") or "SIN_NOMBRE"
+            disp = r.get("disponibility", None)
+            if disp is None:
+                stocks = r.get("stocks") or []
+                disp = sum(_safe_float(s.get("quantity", 0)) for s in stocks) if isinstance(stocks, list) else 0.0
+            disp = _safe_float(disp)
+            if disp > ZERO_EPS:
+                productos_full.append({"productName": str(name), "disponibility": disp})
+        page += 1
+    return productos_full
+
+def _generar_pdf_sin_costos_cantidades(productos_full_needed: bool, usuario: str):
     """
-    Genera un PDF SIN costos (solo producto y disponibilidad + resumen de cantidades).
-    Requiere REPORTLAB_AVAILABLE=True.
+    Genera un PDF SIN costos: solo 'Producto' y 'Disponibilidad'.
+    Si productos_full_needed=True, lee todos los productos del backend.
     """
     if not REPORTLAB_AVAILABLE:
         raise RuntimeError("ReportLab no está disponible para generar PDF.")
+    productos_full = _recopilar_productos_completos(usuario) if productos_full_needed else []
     import io
     from reportlab.pdfgen import canvas
     from reportlab.lib.pagesizes import A4
+
+    total_items = len(productos_full)
+    total_disp = sum(_safe_float(p["disponibility"]) for p in productos_full)
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
@@ -530,14 +595,12 @@ def _generar_pdf_sin_costos(productos, payload):
     y = h - 50
 
     c.drawString(40, y, "Totalizar Inventario (sin costos)"); y -= 20
-    c.drawString(40, y, f"Items: {payload['resumen']['items']}"); y -= 20
-    c.drawString(40, y, f"Disponibilidad Total: {payload['resumen']['disponibilidad_total']}"); y -= 30
+    c.drawString(40, y, f"Items: {total_items}"); y -= 20
+    c.drawString(40, y, f"Disponibilidad Total: {round(total_disp, 6)}"); y -= 30
 
-    # Encabezado sin costos
     c.drawString(40, y, "Producto | Disponibilidad"); y -= 18
 
-    # Limitar filas para evitar PDFs gigantes
-    for p in productos[:1000]:
+    for p in productos_full[:5000]:  # límite de filas por seguridad
         line = f"{p['productName']} | {p['disponibility']}"
         c.drawString(40, y, line); y -= 14
         if y < 60:
@@ -547,35 +610,29 @@ def _generar_pdf_sin_costos(productos, payload):
     buf.seek(0)
     return buf.read(), "totalizar-inventario.pdf", "application/pdf"
 
-
-def _generar_excel_sin_costos(productos, payload):
+def _generar_excel_sin_costos_cantidades(productos_full_needed: bool, usuario: str):
     """
     Genera un Excel SIN costos:
       - Hoja 'Inventario' con columnas: Producto, Disponibilidad
-      - Hoja 'Resumen' con Items y Disponibilidad Total (sin costo total)
-    Requiere OPENPYXL_AVAILABLE=True.
+      - Hoja 'Resumen' con Items y Disponibilidad Total
     """
     if not OPENPYXL_AVAILABLE:
         raise RuntimeError("openpyxl no está disponible para generar Excel.")
+    productos_full = _recopilar_productos_completos(usuario) if productos_full_needed else []
+
     import io
     from openpyxl import Workbook
 
     wb = Workbook()
-
-    # Hoja detalle
     ws = wb.active
     ws.title = "Inventario"
     ws.append(["Producto", "Disponibilidad"])
-    for p in productos:
+    for p in productos_full:
         ws.append([p["productName"], p["disponibility"]])
 
-    # Hoja resumen (sin costos)
     ws2 = wb.create_sheet("Resumen")
     ws2.append(["Items", "Disponibilidad Total"])
-    ws2.append([
-        payload["resumen"]["items"],
-        payload["resumen"]["disponibilidad_total"],
-    ])
+    ws2.append([len(productos_full), round(sum(_safe_float(x["disponibility"]) for x in productos_full), 6)])
 
     bio = io.BytesIO()
     wb.save(bio)
