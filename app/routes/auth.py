@@ -1,4 +1,4 @@
-"""
+﻿"""
 routes/auth.py
 ---------------
 
@@ -28,10 +28,10 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/login-tecopos")
-def login_tecopos(data: LoginData, http_client: HTTPClient = Depends(get_http_client())):
+def login_tecopos(data: LoginData, http_client: HTTPClient = Depends(get_http_client))):
     return login_user(data, http_client)
 
 
 @router.post("/seleccionar-negocio")
-def post_seleccionar_negocio(data: SeleccionNegocio, http_client: HTTPClient = Depends(get_http_client())):
+def post_seleccionar_negocio(data: SeleccionNegocio, http_client: HTTPClient = Depends(get_http_client))):
     return seleccionar_negocio(data, http_client)

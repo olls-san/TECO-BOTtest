@@ -1,4 +1,4 @@
-"""
+﻿"""
 routes/reports.py
 ------------------
 
@@ -84,12 +84,12 @@ def post_reporte_ventas_global(data: ReporteGlobalRequest, http_client: HTTPClie
 def get_comparativa_semanal(
     usuario: str = Query(..., description="Usuario registrado (clave en user_context)"),
     fecha_inicio: str = Query(..., description="Fecha inicial en formato YYYY-MM-DD"),
-    semanas: int = Query(2, ge=2, le=8, description="Número de semanas a comparar"),
+    semanas: int = Query(2, ge=2, le=8, description="NÃºmero de semanas a comparar"),
     http_client: HTTPClient = Depends(get_http_client),
 ):
     return comparativa_semanal(usuario, fecha_inicio, semanas, http_client)
 
 
-@router.post("/ticket-promedio", tags=["Análisis"], operation_id="calcular_ticket_promedio")
+@router.post("/ticket-promedio", tags=["AnÃ¡lisis"], operation_id="calcular_ticket_promedio")
 def post_ticket_promedio(data: RangoFechasConHora = Body(...), http_client: HTTPClient = Depends(get_http_client)):
     return ticket_promedio(data, http_client)

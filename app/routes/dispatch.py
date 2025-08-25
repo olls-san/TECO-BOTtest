@@ -1,9 +1,9 @@
-"""
+﻿"""
 routes/dispatch.py
 -------------------
 
 API routes for dispatch operations, including replicating products
-between stock areas. This route follows the multi‑step flow of
+between stock areas. This route follows the multiâ€‘step flow of
 soliciting business IDs, stock areas and then performing the
 replication.
 """
