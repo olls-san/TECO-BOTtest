@@ -1,4 +1,4 @@
-﻿"""
+"""
 routes/dispatch.py
 -------------------
 
@@ -24,6 +24,6 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/replicar-productos", summary="Replicar productos entre negocios mediante despacho Tecopos", tags=["Despachos"])
-def post_replicar_productos(data: ReplicarProductosRequest, http_client: HTTPClient = Depends(get_http_client):
+def post_replicar_productos(data: ReplicarProductosRequest, http_client: HTTPClient = Depends(get_http_client)):
     return replicar_productos(data, http_client)
 

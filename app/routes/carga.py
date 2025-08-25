@@ -1,4 +1,4 @@
-﻿"""
+"""
 routes/carga.py
 ----------------
 
@@ -33,21 +33,21 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/crear-carga-con-productos")
-def post_crear_carga_con_productos(data: CrearCargaConProductosRequest, http_client: HTTPClient = Depends(get_http_client):
+def post_crear_carga_con_productos(data: CrearCargaConProductosRequest, http_client: HTTPClient = Depends(get_http_client)):
     return crear_carga_con_productos(data, http_client)
 
 
 @router.post("/entrada-productos-en-carga")
-def post_entrada_productos_en_carga(data: EntradaProductosEnCargaRequest, http_client: HTTPClient = Depends(get_http_client):
+def post_entrada_productos_en_carga(data: EntradaProductosEnCargaRequest, http_client: HTTPClient = Depends(get_http_client)):
     return entrada_productos_en_carga(data, http_client)
 
 
 @router.get("/listar-cargas-disponibles")
-def get_listar_cargas_disponibles(usuario: str, http_client: HTTPClient = Depends(get_http_client):
+def get_listar_cargas_disponibles(usuario: str, http_client: HTTPClient = Depends(get_http_client)):
     return listar_cargas_disponibles(usuario, http_client)
 
 
 @router.post("/verificar-productos-existen", response_model=ProductosFaltantesResponse)
-def post_verificar_productos_existen(data: VerificarProductosRequest, http_client: HTTPClient = Depends(get_http_client):
+def post_verificar_productos_existen(data: VerificarProductosRequest, http_client: HTTPClient = Depends(get_http_client)):
     return verificar_productos_existen(data, http_client)
 

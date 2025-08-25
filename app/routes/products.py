@@ -1,4 +1,4 @@
-﻿"""
+"""
 routes/products.py
 -------------------
 
@@ -25,11 +25,11 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/crear-producto-con-categoria")
-def post_crear_producto_con_categoria(data: Producto, http_client: HTTPClient = Depends(get_http_client):
+def post_crear_producto_con_categoria(data: Producto, http_client: HTTPClient = Depends(get_http_client)):
     return crear_producto_con_categoria(data, http_client)
 
 
 @router.post("/entrada-inteligente")
-def post_entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient = Depends(get_http_client):
+def post_entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient = Depends(get_http_client)):
     return entrada_inteligente(data, http_client)
 
