@@ -7,19 +7,12 @@ orjson==3.10.7
 pydantic==2.8.2
 pydantic-settings==2.4.0
 
-fastapi
-uvicorn
-requests
-matplotlib
-pandas
-httpx
-reportlab>=4.0.0
-xlsxwriter
-
-# Exportación/Reportes
+# Exportacion/Reportes
 openpyxl==3.1.5
 XlsxWriter==3.2.5
 reportlab==4.2.5
 
 # Subida de archivos/form-data
 python-multipart==0.0.9
+
+
