@@ -41,22 +41,22 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/reporte-ventas")
-def post_reporte_ventas(data: ReporteVentasRequest, http_client: HTTPClient = Depends(get_http_client)):
+def post_reporte_ventas(data: ReporteVentasRequest, http_client: HTTPClient = Depends(get_http_client):
     return reporte_ventas(data, http_client)
 
 
 @router.post("/reporte-quiebre-stock")
-def post_reporte_quiebre_stock(request_body: QuiebreRequest, http_client: HTTPClient = Depends(get_http_client)):
+def post_reporte_quiebre_stock(request_body: QuiebreRequest, http_client: HTTPClient = Depends(get_http_client):
     return reporte_quiebre_stock(request_body, http_client)
 
 
 @router.post("/analisis-desempeno")
-def post_analisis_desempeno(data: AnalisisDesempenoRequest, http_client: HTTPClient = Depends(get_http_client)):
+def post_analisis_desempeno(data: AnalisisDesempenoRequest, http_client: HTTPClient = Depends(get_http_client):
     return analisis_desempeno(data, http_client)
 
 
 @router.post("/ventas-diarias")
-def post_ventas_diarias(data: Dict[str, Any] = Body(...), http_client: HTTPClient = Depends(get_http_client)):
+def post_ventas_diarias(data: Dict[str, Any] = Body(...), http_client: HTTPClient = Depends(get_http_client):
     return ventas_diarias(data, http_client)
 
 
@@ -76,7 +76,7 @@ def post_proyeccion_ventas(
 
 
 @router.post("/reporte-ventas-global")
-def post_reporte_ventas_global(data: ReporteGlobalRequest, http_client: HTTPClient = Depends(get_http_client)):
+def post_reporte_ventas_global(data: ReporteGlobalRequest, http_client: HTTPClient = Depends(get_http_client):
     return reporte_ventas_global(data, http_client)
 
 
@@ -91,5 +91,6 @@ def get_comparativa_semanal(
 
 
 @router.post("/ticket-promedio", tags=["AnÃ¡lisis"], operation_id="calcular_ticket_promedio")
-def post_ticket_promedio(data: RangoFechasConHora = Body(...), http_client: HTTPClient = Depends(get_http_client)):
+def post_ticket_promedio(data: RangoFechasConHora = Body(...), http_client: HTTPClient = Depends(get_http_client):
     return ticket_promedio(data, http_client)
+

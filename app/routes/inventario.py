@@ -30,3 +30,4 @@ def get_totalizar_inventario(
     http_client: HTTPClient = Depends(get_http_client),
 ):
     return totalizar_inventario(usuario, enviar_por_correo, destinatario, formato, http_client)
+

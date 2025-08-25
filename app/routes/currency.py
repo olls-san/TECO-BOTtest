@@ -23,5 +23,6 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/actualizar-monedas")
-def post_actualizar_monedas(data: CambioMonedaRequest, http_client: HTTPClient = Depends(get_http_client)):
+def post_actualizar_monedas(data: CambioMonedaRequest, http_client: HTTPClient = Depends(get_http_client):
     return actualizar_monedas(data, http_client)
+
