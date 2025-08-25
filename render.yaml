@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: tecopos-product-api
+    env: docker
+    autoDeploy: true
+    plan: starter
+    healthCheckPath: /openapi.json
+    buildCommand: docker build -t tecopos-product-api .
+    startCommand: >-
+      bash -lc "gunicorn -k uvicorn.workers.UvicornWorker app.main:app
+      --bind 0.0.0.0:${PORT} --workers ${WORKERS:-4} --timeout 60"
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: WORKERS
+        value: 4
+      - key: REGION
+        value: apidev
+      - key: HTTP_TIMEOUT_SECONDS
+        value: "10"
+      - key: HTTP_RETRIES_GET
+        value: "3"
+      - key: MAX_PAGES
+        value: "50"
+      - key: MAX_ITEMS
+        value: "10000"
+      - key: TECOPOS_API_TOKEN
+        sync: false
+      - key: EMAIL_SMTP_PASSWORD
+        sync: false

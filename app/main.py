@@ -1,75 +1,51 @@
 """
-Punto de entrada FastAPI (modular).
-Registra routers y añade integración para ChatGPT Actions:
-- CORS para chat.openai.com
-- Servir /.well-known/ai-plugin.json
-- /healthz
-- OpenAPI con un solo 'server' = dominio público
+main.py
+-------
+
+Application entrypoint. Creates the FastAPI instance, configures
+lifespan events to instantiate the shared HTTP client and registers
+all routers. The default response class uses ORJSON for faster
+serialization. Middlewares can be added here as necessary.
 """
+
 from __future__ import annotations
-from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.openapi.utils import get_openapi
+from fastapi.responses import ORJSONResponse
 
-# Routers existentes (modular)
-from .routes.auth import router as auth_router
-from .routes.products import router as products_router
-from .routes.reports import router as reports_router
-from .routes.currency import router as currency_router
-from .routes.dispatch import router as dispatch_router
-from .routes.inventory import router as inventory_router
+from app.clients.http_client import HTTPClient
+from app.routes.auth import router as auth_router
+from app.routes.products import router as products_router
+from app.routes.reports import router as reports_router
+from app.routes.currency import router as currency_router
+from app.routes.dispatch import router as dispatch_router
+from app.routes.carga import router as carga_router
+from app.routes.rendimiento import router as rendimiento_router
+from app.routes.inventario import router as inventario_router
 
-# === Config ===
-PUBLIC_SERVER_URL = "https://teco-bottest.onrender.com"  # <— cambia si usas otro dominio
 
-app = FastAPI(
-    title="Tecopos Product API",
-    version="1.1.0",
-    description="TECO-BOT modular API"
-)
+def create_app() -> FastAPI:
+    app = FastAPI(default_response_class=ORJSONResponse)
+    # create http client during startup and close on shutdown
+    @app.on_event("startup")
+    def startup_event() -> None:
+        app.state.http_client = HTTPClient()  # CHANGED: reuse connections via singleton
 
-# 1) CORS para ChatGPT
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://chat.openai.com", "https://*.openai.com"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    @app.on_event("shutdown")
+    def shutdown_event() -> None:
+        client: HTTPClient = app.state.http_client
+        client.close()
 
-# 2) Servir /.well-known/ai-plugin.json
-ROOT_DIR = Path(__file__).resolve().parents[1]   # carpeta raíz del repo
-WELLKNOWN_DIR = ROOT_DIR / ".well-known"
-app.mount("/.well-known", StaticFiles(directory=str(WELLKNOWN_DIR)), name="wellknown")
+    # register routers
+    app.include_router(auth_router)
+    app.include_router(products_router)
+    app.include_router(reports_router)
+    app.include_router(currency_router)
+    app.include_router(dispatch_router)
+    app.include_router(carga_router)
+    app.include_router(rendimiento_router)
+    app.include_router(inventario_router)
+    return app
 
-# 3) Health check (útil para provocar el prompt "Allow")
-@app.get("/healthz", include_in_schema=True, summary="Health check")
-def healthz():
-    return {"ok": True}
 
-# 4) OpenAPI con UN solo server (coincidir con tu dominio público)
-def custom_openapi() -> dict:
-    if app.openapi_schema:
-        return app.openapi_schema
-    schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-    )
-    schema["servers"] = [{"url": PUBLIC_SERVER_URL}]
-    app.openapi_schema = schema
-    return app.openapi_schema
-
-app.openapi = custom_openapi  # type: ignore
-
-# 5) Registrar routers (se mantiene modular)
-app.include_router(auth_router)
-app.include_router(products_router)
-app.include_router(reports_router)
-app.include_router(currency_router)
-app.include_router(dispatch_router)
-app.include_router(inventory_router)
+app = create_app()

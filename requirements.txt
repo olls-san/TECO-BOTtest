@@ -1,3 +1,12 @@
+fastapi==0.112.2
+uvicorn[standard]==0.30.6
+gunicorn==22.0.0
+
+httpx==0.28.1
+orjson==3.10.7
+pydantic==2.8.2
+pydantic-settings==2.4.0
+
 fastapi
 uvicorn
 requests
@@ -6,3 +15,11 @@ pandas
 httpx
 reportlab>=4.0.0
 xlsxwriter
+
+# Exportación/Reportes
+openpyxl==3.1.5
+XlsxWriter==3.2.5
+reportlab==4.2.5
+
+# Subida de archivos/form-data
+python-multipart==0.0.9
