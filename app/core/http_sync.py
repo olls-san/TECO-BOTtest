@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import time
 from typing import Dict, Any, Optional, Tuple
-
+import httpx
+from fastapi import HTTPException
 import requests
 
 # Default timeouts for requests: (connect timeout, read timeout)
@@ -23,6 +24,28 @@ DEFAULT_TIMEOUT: Tuple[float, float] = (10.0, 30.0)
 
 # HTTP status codes that should trigger a retry
 RETRY_STATUS = {429, 502, 503, 504}
+
+
+# Cliente HTTP singleton para inyección con Depends(get_http_client)
+_client: Optional[httpx.Client] = None
+
+def get_http_client() -> httpx.Client:
+    """
+    Proveedor de cliente HTTP síncrono (inyección FastAPI).
+    Usa pool y http2; timeouts razonables para servicios externos (Tecopos).
+    """
+    global _client
+    if _client is None:
+        _client = httpx.Client(
+            http2=True,
+            timeout=httpx.Timeout(connect=10.0, read=60.0, write=60.0, pool=60.0),
+            limits=httpx.Limits(max_connections=200, max_keepalive_connections=40),
+            verify=True,
+        )
+    return _client
+
+
+
 
 def teco_request(
     method: str,
