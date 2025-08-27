@@ -22,7 +22,7 @@ from app.routes.dispatch import router as dispatch_router
 from app.routes.carga import router as carga_router
 from app.routes.rendimiento import router as rendimiento_router
 from app.routes.inventario import router as inventario_router
-
+from app.routes import rendimiento_descomposicion as rendimiento_descomposicion_routes
 
 def create_app() -> FastAPI:
     app = FastAPI(default_response_class=ORJSONResponse)
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(carga_router)
     app.include_router(rendimiento_router)
     app.include_router(inventario_router)
+    app.include_router(rendimiento_descomposicion_routes.router)
     return app
 
 
