@@ -62,31 +62,40 @@ class RendimientoDescomposicionClient:
         date_to: str,
     ) -> Generator[List[Dict[str, Any]], None, None]:
         """
-        Itera páginas de movimientos padre OUT/DESCOMPOSITION de un rango.
-        GET /api/v1/administration/movement?areaId=...&all_data=true&dateFrom=...&dateTo=...&operation=OUT&category=DESCOMPOSITION&page=X
+        Itera OUT/DESCOMPOSITION. Tecopos espera dateFrom/dateTo en 'YYYY-MM-DD'.
         """
         page = 1
+
+        # CHANGED: recorta a 10 por si vienen "YYYY-MM-DD HH:MM"
+        df = (date_from or "")[:10]
+        dt = (date_to or "")[:10]
+
         base_params = {
             "areaId": area_id,
-            "all_data": "true",
-            "dateFrom": date_from,
-            "dateTo": date_to,
+            "all_data": True,  # httpx lo serializa a 'true'
+            "dateFrom": df,    # YYYY-MM-DD
+            "dateTo": dt,      # YYYY-MM-DD
             "operation": "OUT",
             "category": "DESCOMPOSITION",
         }
         url = f"{self.base_url}/api/v1/administration/movement"
+
         while True:
             params = dict(base_params)
             params["page"] = page
+
             resp = teco_request("GET", url, headers=self.headers, params=params)
             if not (200 <= resp.status_code < 300):
                 raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
             data = resp.json()
             items = data.get("items") if isinstance(data, dict) else None
             if not items:
                 break
+
             yield items
             page += 1
+
 
     # --------------------------
     # DETALLE MOVIMIENTO
