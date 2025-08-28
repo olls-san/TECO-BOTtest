@@ -16,38 +16,6 @@ from app.clients.rendimiento_descomposicion_client import RendimientoDescomposic
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
-ctx = get_user_context(usuario)
-if not ctx:
-    raise HTTPException(status_code=403, detail="Usuario no autenticado")
-
-client = RendimientoDescomposicionClient(region=ctx["region"], token=ctx["token"], business_id=ctx["businessId"])
-
-area_id = body.get("area_id")
-area_nombre = body.get("area_nombre")
-resolved_area_name = None
-
-if not (area_id or area_nombre):
-    # modo asistente ya lo maneja antes; aquí seguimos igual
-    raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
-
-if not area_id and area_nombre:
-    match, candidates = client.find_area_candidates(area_nombre)
-    if match:
-        area_id = int(match["id"])
-        resolved_area_name = match["name"]
-    else:
-        if candidates:
-            # Ambiguo → devolvemos ASK con las candidatas (mismo contrato)
-            return {
-                "status": "ask",
-                "intent": "rendimiento_descomposicion",
-                "prompt": f"Tu búsqueda coincide con varias áreas parecidas a '{area_nombre}'. Elige una:",
-                "missing": ["area_id o area_nombre"],
-                "options": candidates[:10],  # no saturar
-            }
-        # 0 coincidencias
-        raise HTTPException(status_code=400, detail=f"Área '{area_nombre}' no encontrada")
-
 
 # --------------------------
 # FECHAS
@@ -89,6 +57,78 @@ def _bucket_key(dt_iso: str, granularidad: str) -> str:
 
 
 # --------------------------
+# SELECCIÓN DE ÁREA
+# --------------------------
+def _resolve_area_or_ask(
+    *,
+    client: RendimientoDescomposicionClient,
+    area_id: Optional[int],
+    area_nombre: Optional[str],
+    modo_asistente: bool,
+) -> Tuple[Optional[int], Optional[str], Optional[Dict[str, Any]]]:
+    """
+    Devuelve (area_id_resuelto, area_name_resuelto, ask_payload_o_None).
+    Si falta área y 'modo_asistente' es True → ask con opciones (si hay sesión).
+    Si el nombre es ambiguo → ask con candidatas.
+    """
+    resolved_area_name: Optional[str] = None
+
+    # Si viene ID, intentar resolver nombre (opcional)
+    if area_id:
+        try:
+            # intento de obtener nombre de la lista (opcional; si falla, seguimos con None)
+            areas = client.list_stock_areas()
+            for a in areas:
+                if int(a.get("id")) == int(area_id):
+                    resolved_area_name = a.get("name") or None
+                    break
+        except Exception:
+            pass
+        return int(area_id), resolved_area_name, None
+
+    # Si viene nombre, buscar coincidencias
+    if area_nombre:
+        # Preferimos usar find_area_candidates si existe en el client
+        try:
+            match, candidates = client.find_area_candidates(area_nombre)
+        except AttributeError:
+            # Si no existe, degradar a búsqueda exacta simple
+            areas = client.list_stock_areas()
+            match = next(({"id": a["id"], "name": a["name"]} for a in areas if (a.get("name") or "").strip().lower() == area_nombre.strip().lower()), None)
+            candidates = []
+
+        if match:
+            return int(match["id"]), match["name"], None
+        if candidates:
+            return None, None, {
+                "status": "ask",
+                "intent": "rendimiento_descomposicion",
+                "prompt": f"Tu búsqueda coincide con varias áreas parecidas a '{area_nombre}'. Elige una:",
+                "missing": ["area_id o area_nombre"],
+                "options": candidates[:10],
+            }
+        raise HTTPException(status_code=400, detail=f"Área '{area_nombre}' no encontrada")
+
+    # No llegó ni id ni nombre
+    if modo_asistente:
+        # En asistente, pedimos selección (si hay sesión podremos poblar opciones desde la ruta que uses para listar áreas)
+        try:
+            options = [{"id": a["id"], "label": a["name"]} for a in client.list_stock_areas()][:15]
+        except Exception:
+            options = []
+        return None, None, {
+            "status": "ask",
+            "intent": "rendimiento_descomposicion",
+            "prompt": "¿Sobre qué área quieres calcular el rendimiento de descomposición?",
+            "missing": ["area_id o area_nombre"],
+            "options": options,
+        }
+
+    # Sin asistente → 400 duro
+    raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
+
+
+# --------------------------
 # KPIs por movimiento
 # --------------------------
 def _compute_kpis_from_detail(
@@ -99,8 +139,8 @@ def _compute_kpis_from_detail(
     """
     Calcula:
       - usado_padre
-      - manufacturados_total (solo hijos ENTRY/DESCOMPOSITION/MANUFACTURED
-      - merma_total (ENTRY/WASTE)
+      - manufacturados_total (solo hijos ENTRY/DESCOMPOSITION/MANUFACTURED)
+      - merma_total (ENTRY/WASTE o type=WASTE)
       - rendimiento_porcentaje (si misma unidad)
       - devuelve además metadatos: padre, fecha, movementId
     """
@@ -133,7 +173,7 @@ def _compute_kpis_from_detail(
             if product_filter and pid not in product_filter:
                 continue
             manuf_total += qty
-            d = manuf_by_product[pid]
+            d = manuf_by_product[int(pid)]
             d["name"] = pname
             d["measure"] = pmeasure
             d["qty"] += qty
@@ -170,7 +210,7 @@ def _compute_kpis_from_detail(
         "merma_total": waste_total,
         "rendimiento_porcentaje": None if rendimiento is None else round(rendimiento, 2),
         "createdAt": created_at,
-        "manuf_by_product": {pid: v for pid, v in manuf_by_product.items()},
+        "manuf_by_product": {int(pid): v for pid, v in manuf_by_product.items()},
     }
 
 
@@ -200,7 +240,7 @@ def rendimiento_descomposicion_service(
     """
     Resuelve POST /rendimientoDescomposicion
     - Valida contexto
-    - Resuelve área (id/nombre)
+    - Resuelve área (id/nombre) con 'ask' si aplica
     - Lista padres OUT/DESCOMPOSITION (paginado)
     - Detalle por movimiento y KPIs
     - Agregados por bucket (DIA/SEMANA/MES) y por producto
@@ -214,12 +254,31 @@ def rendimiento_descomposicion_service(
     if not ctx:
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
 
-    area_id = body.get("area_id")
+    # 2) Cliente Tecopos
+    client = RendimientoDescomposicionClient(
+        region=ctx["region"],
+        token=ctx["token"],
+        business_id=ctx["businessId"],
+    )
+
+    # 3) Área (id/nombre) con soporte 'ask' en asistente
+    area_id_in = body.get("area_id")
     area_nombre = body.get("area_nombre")
-    if not area_id and not area_nombre:
+    modo_asistente = bool(body.get("modo_asistente")) or bool(body.get("texto"))
+
+    area_id, resolved_area_name, ask_payload = _resolve_area_or_ask(
+        client=client,
+        area_id=area_id_in,
+        area_nombre=area_nombre,
+        modo_asistente=modo_asistente,
+    )
+    if ask_payload:
+        return ask_payload
+    if not area_id:
+        # Defensa adicional (no debería ocurrir aquí)
         raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
 
-    # 2) Fechas
+    # 4) Fechas de trabajo
     fecha_inicio = body.get("fecha_inicio")
     fecha_fin = body.get("fecha_fin")
     if not fecha_inicio and not fecha_fin:
@@ -231,38 +290,33 @@ def rendimiento_descomposicion_service(
     elif fecha_fin and not fecha_inicio:
         fecha_inicio = fecha_fin
 
+    # Guardamos rango normalizado (coherencia de proyecto), aunque Tecopos usará sólo la parte fecha
     fi_dt = _parse_yyyy_mm_dd(fecha_inicio)
     ff_dt = _parse_yyyy_mm_dd(fecha_fin)
-
-    date_from, date_to = normalizar_rango(
+    _df, _dt = normalizar_rango(
         datetime.combine(fi_dt, datetime.min.time()),
         datetime.combine(ff_dt, datetime.min.time()),
-    )  # devuelve "YYYY-MM-DD HH:MM"
+    )  # devuelve "YYYY-MM-DD HH:MM" (informativo)
 
-    granularidad = body.get("granularidad") or "DIA"
+    # 5) Filtros/flags
+    granularidad = (body.get("granularidad") or "DIA").upper()
+    if granularidad not in {"DIA", "SEMANA", "MES"}:
+        granularidad = "DIA"
+
     product_filter = body.get("product_ids") or None
+    if product_filter:
+        try:
+            product_filter = [int(x) for x in product_filter]
+        except Exception:
+            raise HTTPException(status_code=400, detail="'product_ids' debe ser una lista de enteros")
+
     incluir_movs = bool(body.get("incluir_movimientos", False))
 
-    # 3) Cliente Tecopos
-    client = RendimientoDescomposicionClient(
-        region=ctx["region"],
-        token=ctx["token"],
-        business_id=ctx["businessId"],
-    )
-
-    # 4) Resolver área si vino por nombre
-    resolved_area_name = None
-    if not area_id:
-        area_obj = client.resolve_area_by_name(area_nombre)
-        if not area_obj:
-            raise HTTPException(status_code=400, detail=f"Área '{area_nombre}' no encontrada")
-        area_id = int(area_obj["id"])
-        resolved_area_name = area_obj["name"]
-
-    # 5) Listar padres (paginación) y computar KPIs por movimiento
+    # 6) Listar padres (paginación) y computar KPIs por movimiento
     warnings: List[str] = []
     movimientos_kpi: List[Dict[str, Any]] = []
-    for page_items in client.iter_parent_movements(area_id=area_id, date_from=date_from, date_to=date_to):
+    # IMPORTANTe: Tecopos espera YYYY-MM-DD; pasamos fecha_inicio/fin (no las horas)
+    for page_items in client.iter_parent_movements(area_id=area_id, date_from=fecha_inicio, date_to=fecha_fin):
         for it in page_items:
             mid = it.get("id")
             if mid is None:
@@ -271,8 +325,8 @@ def rendimiento_descomposicion_service(
             kpi = _compute_kpis_from_detail(detail, product_filter, warnings)
             movimientos_kpi.append(kpi)
 
-    # 6) Agregados
-    # 6.1 Resumen global
+    # 7) Agregados
+    # 7.1 Resumen global
     total_usado = sum(m["padre"]["usado"] for m in movimientos_kpi)
     total_manuf = sum(m["manufacturados_total"] for m in movimientos_kpi)
     total_merma = sum(m["merma_total"] for m in movimientos_kpi)
@@ -280,7 +334,7 @@ def rendimiento_descomposicion_service(
     if total_usado > 0:
         rend_ponderado = round((total_manuf / total_usado) * 100.0, 2)
 
-    # 6.2 Series por bucket
+    # 7.2 Series por bucket
     series_aggr: Dict[str, Dict[str, float]] = defaultdict(lambda: {"usado": 0.0, "manuf": 0.0, "merma": 0.0})
     series_ratio: Dict[str, Optional[float]] = {}
     for m in movimientos_kpi:
@@ -306,7 +360,7 @@ def rendimiento_descomposicion_service(
         for b, vals in sorted(series_aggr.items(), key=lambda kv: kv[0])
     ]
 
-    # 6.3 Por producto (solo hijos MANUFACTURED)
+    # 7.3 Por producto (solo hijos MANUFACTURED)
     prod_aggr: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
         "name": "",
         "measure": None,
@@ -317,7 +371,6 @@ def rendimiento_descomposicion_service(
         "rend_list": [],  # rendimientos por movimiento donde participa
     })
     for m in movimientos_kpi:
-        # si el movimiento tuvo manufacturados, distribuye por producto
         for pid, info in (m.get("manuf_by_product") or {}).items():
             pa = prod_aggr[int(pid)]
             pa["name"] = info.get("name") or pa["name"]
@@ -346,7 +399,7 @@ def rendimiento_descomposicion_service(
             "rendimiento_stddev": std,
         })
 
-    # 7) Preparar salida EXACTA al contrato
+    # 8) Preparar salida EXACTA al contrato
     out = {
         "periodo": {
             "desde": fecha_inicio,
@@ -355,7 +408,7 @@ def rendimiento_descomposicion_service(
         },
         "area": {
             "id": int(area_id),
-            "nombre": resolved_area_name if resolved_area_name else (movimientos_kpi[0]["padre"]["productName"] and detail.get("area", {}).get("name", "")) if movimientos_kpi else (resolved_area_name or ""),
+            "nombre": resolved_area_name or "",
         },
         "filtros": {
             "product_ids": product_filter or [],
