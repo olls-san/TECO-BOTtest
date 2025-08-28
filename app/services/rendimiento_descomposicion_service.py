@@ -7,7 +7,8 @@ from math import sqrt
 from fastapi import Depends, HTTPException
 from httpx import Client
 
-from app.utils import user_context, normalizar_rango
+from app.core.context import get_user_context
+from app.utils import normalizar_rango
 from app.core.http_sync import get_http_client  # inyección requerida (sin paréntesis)
 from app.clients.rendimiento_descomposicion_client import RendimientoDescomposicionClient
 
@@ -177,7 +178,7 @@ def rendimiento_descomposicion_service(
         raise HTTPException(status_code=400, detail="Falta 'usuario'")
 
     # 1) Contexto
-    ctx = user_context.get(usuario)
+    ctx = get_user_context(usuario)
     if not ctx:
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
 
