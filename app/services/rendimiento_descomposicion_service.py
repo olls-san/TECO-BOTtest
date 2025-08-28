@@ -16,6 +16,38 @@ from app.clients.rendimiento_descomposicion_client import RendimientoDescomposic
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 
+ctx = get_user_context(usuario)
+if not ctx:
+    raise HTTPException(status_code=403, detail="Usuario no autenticado")
+
+client = RendimientoDescomposicionClient(region=ctx["region"], token=ctx["token"], business_id=ctx["businessId"])
+
+area_id = body.get("area_id")
+area_nombre = body.get("area_nombre")
+resolved_area_name = None
+
+if not (area_id or area_nombre):
+    # modo asistente ya lo maneja antes; aquí seguimos igual
+    raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
+
+if not area_id and area_nombre:
+    match, candidates = client.find_area_candidates(area_nombre)
+    if match:
+        area_id = int(match["id"])
+        resolved_area_name = match["name"]
+    else:
+        if candidates:
+            # Ambiguo → devolvemos ASK con las candidatas (mismo contrato)
+            return {
+                "status": "ask",
+                "intent": "rendimiento_descomposicion",
+                "prompt": f"Tu búsqueda coincide con varias áreas parecidas a '{area_nombre}'. Elige una:",
+                "missing": ["area_id o area_nombre"],
+                "options": candidates[:10],  # no saturar
+            }
+        # 0 coincidencias
+        raise HTTPException(status_code=400, detail=f"Área '{area_nombre}' no encontrada")
+
 
 # --------------------------
 # FECHAS
