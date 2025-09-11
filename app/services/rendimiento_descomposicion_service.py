@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from math import sqrt
-
+from datetime import timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import Depends, HTTPException
 from httpx import Client
 
@@ -313,40 +314,170 @@ def rendimiento_descomposicion_service(
     incluir_movs = bool(body.get("incluir_movimientos", False))
 
     # 6) Listar padres (paginación) y computar KPIs por movimiento
-    warnings: List[str] = []
-    movimientos_kpi: List[Dict[str, Any]] = []
-    # IMPORTANTe: Tecopos espera YYYY-MM-DD; pasamos fecha_inicio/fin (no las horas)
-    for page_items in client.iter_parent_movements(area_id=area_id, date_from=fecha_inicio, date_to=fecha_fin):
-        for it in page_items:
-            mid = it.get("id")
-            if mid is None:
-                continue
-            detail = client.get_movement_detail(int(mid))
-            kpi = _compute_kpis_from_detail(detail, product_filter, warnings)
-            movimientos_kpi.append(kpi)
+   body: Dict[str, Any],
+    http: Client = Depends(get_http_client),
+) -> Dict[str, Any]:
+    # ===== 0) Previo: (tu bloque existente 1–5) =====
+    usuario = body.get("usuario")
+    if not usuario:
+        raise HTTPException(status_code=400, detail="Falta 'usuario'")
 
-    # 7) Agregados
-    # 7.1 Resumen global
-    total_usado = sum(m["padre"]["usado"] for m in movimientos_kpi)
-    total_manuf = sum(m["manufacturados_total"] for m in movimientos_kpi)
-    total_merma = sum(m["merma_total"] for m in movimientos_kpi)
-    rend_ponderado = None
-    if total_usado > 0:
-        rend_ponderado = round((total_manuf / total_usado) * 100.0, 2)
+    ctx = get_user_context(usuario)
+    if not ctx:
+        raise HTTPException(status_code=403, detail="Usuario no autenticado")
 
-    # 7.2 Series por bucket
+    client = RendimientoDescomposicionClient(
+        region=ctx["region"],
+        token=ctx["token"],
+        business_id=ctx["businessId"],
+    )
+
+    area_id_in = body.get("area_id")
+    area_nombre = body.get("area_nombre")
+    modo_asistente = bool(body.get("modo_asistente")) or bool(body.get("texto"))
+    area_id, resolved_area_name, ask_payload = _resolve_area_or_ask(
+        client=client,
+        area_id=area_id_in,
+        area_nombre=area_nombre,
+        modo_asistente=modo_asistente,
+    )
+    if ask_payload:
+        return ask_payload
+    if not area_id:
+        raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
+
+    fecha_inicio = body.get("fecha_inicio")
+    fecha_fin = body.get("fecha_fin")
+    if not fecha_inicio and not fecha_fin:
+        today = _today_ny()
+        fecha_inicio = today.strftime("%Y-%m-%d")
+        fecha_fin = fecha_inicio
+    elif fecha_inicio and not fecha_fin:
+        fecha_fin = fecha_inicio
+    elif fecha_fin and not fecha_inicio:
+        fecha_inicio = fecha_fin
+
+    fi_dt = _parse_yyyy_mm_dd(fecha_inicio)
+    ff_dt = _parse_yyyy_mm_dd(fecha_fin)
+    _df, _dt = normalizar_rango(
+        datetime.combine(fi_dt, datetime.min.time()),
+        datetime.combine(ff_dt, datetime.min.time()),
+    )
+
+    granularidad = (body.get("granularidad") or "DIA").upper()
+    if granularidad not in {"DIA", "SEMANA", "MES"}:
+        granularidad = "DIA"
+
+    product_filter = body.get("product_ids") or None
+    if product_filter:
+        try:
+            product_filter = [int(x) for x in product_filter]
+        except Exception:
+            raise HTTPException(status_code=400, detail="'product_ids' debe ser una lista de enteros")
+
+    incluir_movs = bool(body.get("incluir_movimientos", False))
+
+    # ===== 1) Parámetros de escalabilidad =====
+    chunk_days = int(body.get("chunk_days") or 30)          # días por ventana
+    max_concurrency = int(body.get("max_concurrency") or 8) # hilos para detalles
+    modo_agregado = bool(body.get("modo_agregado", False))  # fuerza no guardar movimientos
+    if modo_agregado:
+        incluir_movs = False
+
+    # ===== 2) Acumuladores en streaming =====
+    total_usado = 0.0
+    total_manuf = 0.0
+    total_merma = 0.0
+
     series_aggr: Dict[str, Dict[str, float]] = defaultdict(lambda: {"usado": 0.0, "manuf": 0.0, "merma": 0.0})
-    series_ratio: Dict[str, Optional[float]] = {}
-    for m in movimientos_kpi:
-        b = _bucket_key(m.get("createdAt") or (m.get("fecha") + "T00:00:00"), granularidad)
-        series_aggr[b]["usado"] += m["padre"]["usado"]
-        series_aggr[b]["manuf"] += m["manufacturados_total"]
-        series_aggr[b]["merma"] += m["merma_total"]
+    prod_aggr: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
+        "name": "",
+        "measure": None,
+        "mov": 0,
+        "usado": 0.0,
+        "manuf": 0.0,
+        "merma": 0.0,
+        "rend_list": [],
+    })
+    movimientos_kpi: List[Dict[str, Any]] = [] if incluir_movs else None
+    warnings: List[str] = []
 
+    def _fetch_detail(mid: int) -> Optional[Dict[str, Any]]:
+        try:
+            detail = client.get_movement_detail(int(mid))  # padre OUT/DESCOMPOSITION con childs
+            return _compute_kpis_from_detail(detail, product_filter, warnings)
+        except Exception as e:
+            warnings.append(f"Error al obtener detalle movementId={mid}: {e}")
+            return None
+
+    # ===== 3) Chunking de fechas + paginación + paralelismo =====
+    cur = fi_dt
+    one_day = timedelta(days=1)
+
+    while cur <= ff_dt:
+        chunk_end = min(cur + timedelta(days=chunk_days - 1), ff_dt)
+
+        ids_en_chunk: List[int] = []
+        for page_items in client.iter_parent_movements(
+            area_id=area_id,
+            date_from=cur.strftime("%Y-%m-%d"),
+            date_to=chunk_end.strftime("%Y-%m-%d"),
+        ):
+            for it in page_items:
+                mid = it.get("id")
+                if mid is not None:
+                    ids_en_chunk.append(int(mid))
+
+        if ids_en_chunk:
+            with ThreadPoolExecutor(max_workers=max_concurrency) as ex:
+                futures = [ex.submit(_fetch_detail, mid) for mid in ids_en_chunk]
+                for fut in as_completed(futures):
+                    kpi = fut.result()
+                    if not kpi:
+                        continue
+
+                    # --- agregados globales ---
+                    total_usado += kpi["padre"]["usado"]
+                    total_manuf += kpi["manufacturados_total"]
+                    total_merma += kpi["merma_total"]
+
+                    # --- serie temporal ---
+                    b = _bucket_key(kpi.get("createdAt") or (kpi.get("fecha") + "T00:00:00"), granularidad)
+                    series_aggr[b]["usado"] += kpi["padre"]["usado"]
+                    series_aggr[b]["manuf"] += kpi["manufacturados_total"]
+                    series_aggr[b]["merma"] += kpi["merma_total"]
+
+                    # --- por producto (hijos MANUFACTURED) ---
+                    for pid, info in (kpi.get("manuf_by_product") or {}).items():
+                        pa = prod_aggr[int(pid)]
+                        pa["name"] = info.get("name") or pa["name"]
+                        if info.get("measure"):
+                            pa["measure"] = info.get("measure")
+                        pa["mov"] += 1
+                        pa["usado"] += kpi["padre"]["usado"]
+                        pa["manuf"] += float(info.get("qty") or 0.0)
+                        pa["merma"] += kpi["merma_total"]
+                        if kpi["rendimiento_porcentaje"] is not None:
+                            pa["rend_list"].append(kpi["rendimiento_porcentaje"])
+
+                    if incluir_movs:
+                        movimientos_kpi.append({
+                            "movementId": kpi["movementId"],
+                            "fecha": kpi["fecha"],
+                            "padre": kpi["padre"],
+                            "manufacturados_total": round(kpi["manufacturados_total"], 4),
+                            "merma_total": round(kpi["merma_total"], 4),
+                            "rendimiento_porcentaje": kpi["rendimiento_porcentaje"],
+                        })
+
+        cur = chunk_end + one_day
+
+    # ===== 4) Cierre de agregados =====
+    rend_ponderado = round((total_manuf / total_usado) * 100.0, 2) if total_usado > 0 else None
+
+    series_ratio: Dict[str, Optional[float]] = {}
     for b, vals in series_aggr.items():
-        rp = None
-        if vals["usado"] > 0:
-            rp = round((vals["manuf"] / vals["usado"]) * 100.0, 2)
+        rp = round((vals["manuf"] / vals["usado"]) * 100.0, 2) if vals["usado"] > 0 else None
         series_ratio[b] = rp
 
     series = [
@@ -359,28 +490,6 @@ def rendimiento_descomposicion_service(
         }
         for b, vals in sorted(series_aggr.items(), key=lambda kv: kv[0])
     ]
-
-    # 7.3 Por producto (solo hijos MANUFACTURED)
-    prod_aggr: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
-        "name": "",
-        "measure": None,
-        "mov": 0,
-        "usado": 0.0,
-        "manuf": 0.0,
-        "merma": 0.0,
-        "rend_list": [],  # rendimientos por movimiento donde participa
-    })
-    for m in movimientos_kpi:
-        for pid, info in (m.get("manuf_by_product") or {}).items():
-            pa = prod_aggr[int(pid)]
-            pa["name"] = info.get("name") or pa["name"]
-            pa["measure"] = info.get("measure") if info.get("measure") else pa["measure"]
-            pa["mov"] += 1
-            pa["usado"] += m["padre"]["usado"]
-            pa["manuf"] += float(info.get("qty") or 0.0)
-            pa["merma"] += m["merma_total"]  # aproximación: asociar merma total del movimiento
-            if m["rendimiento_porcentaje"] is not None:
-                pa["rend_list"].append(m["rendimiento_porcentaje"])
 
     por_producto: List[Dict[str, Any]] = []
     for pid, info in prod_aggr.items():
@@ -399,8 +508,7 @@ def rendimiento_descomposicion_service(
             "rendimiento_stddev": std,
         })
 
-    # 8) Preparar salida EXACTA al contrato
-    out = {
+    return {
         "periodo": {
             "desde": fecha_inicio,
             "hasta": fecha_fin,
@@ -421,17 +529,6 @@ def rendimiento_descomposicion_service(
         },
         "series": series,
         "por_producto": por_producto,
-        "movimientos": [
-            {
-                "movementId": m["movementId"],
-                "fecha": m["fecha"],
-                "padre": m["padre"],
-                "manufacturados_total": round(m["manufacturados_total"], 4),
-                "merma_total": round(m["merma_total"], 4),
-                "rendimiento_porcentaje": m["rendimiento_porcentaje"],
-            }
-            for m in (movimientos_kpi if incluir_movs else [])
-        ],
+        "movimientos": (movimientos_kpi or []) if incluir_movs else [],
         "warnings": warnings,
     }
-    return out
