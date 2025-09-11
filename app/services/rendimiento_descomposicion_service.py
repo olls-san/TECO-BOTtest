@@ -1,26 +1,26 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 from math import sqrt
-from datetime import timedelta
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from fastapi import Depends, HTTPException
+
+from fastapi import APIRouter, Body, Depends, HTTPException
 from httpx import Client
 
+# 🧩 Dependencias del proyecto (ya existentes en tu base)
 from app.core.context import get_user_context
 from app.utils import normalizar_rango
 from app.core.http_sync import get_http_client  # inyección requerida (sin paréntesis)
 from app.clients.rendimiento_descomposicion_client import RendimientoDescomposicionClient
 
-# Helpers locales (no exponen datos sensibles)
-from datetime import datetime, date
-from zoneinfo import ZoneInfo
-
-
-# --------------------------
+# ==============================================================================
 # FECHAS
-# --------------------------
+# ==============================================================================
+
 def _parse_yyyy_mm_dd(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
@@ -31,12 +31,12 @@ def _today_ny() -> date:
 
 def _bucket_key(dt_iso: str, granularidad: str) -> str:
     """
-    Retorna la clave de bucket en string según granularidad.
-    - DIA: YYYY-MM-DD
-    - SEMANA: YYYY-Www (ISO week)
-    - MES: YYYY-MM
+    Retorna la clave de bucket según granularidad.
+      - DIA    -> YYYY-MM-DD
+      - SEMANA -> YYYY-Www (ISO week)
+      - MES    -> YYYY-MM
+    Acepta formatos ISO con o sin 'Z' y con/sin microsegundos.
     """
-    # Formatos posibles: "2025-08-26T15:18:34.724Z" o sin Z
     try:
         ts = datetime.strptime(dt_iso, "%Y-%m-%dT%H:%M:%S.%fZ")
     except Exception:
@@ -48,18 +48,21 @@ def _bucket_key(dt_iso: str, granularidad: str) -> str:
             except Exception:
                 # fallback: solo fecha
                 ts = datetime.strptime(dt_iso[:10], "%Y-%m-%d")
-    if granularidad == "DIA":
+
+    g = (granularidad or "DIA").upper()
+    if g == "DIA":
         return ts.strftime("%Y-%m-%d")
-    if granularidad == "SEMANA":
+    if g == "SEMANA":
         iso = ts.isocalendar()
         return f"{iso.year}-W{iso.week:02d}"
     # MES
     return ts.strftime("%Y-%m")
 
 
-# --------------------------
+# ==============================================================================
 # SELECCIÓN DE ÁREA
-# --------------------------
+# ==============================================================================
+
 def _resolve_area_or_ask(
     *,
     client: RendimientoDescomposicionClient,
@@ -69,15 +72,14 @@ def _resolve_area_or_ask(
 ) -> Tuple[Optional[int], Optional[str], Optional[Dict[str, Any]]]:
     """
     Devuelve (area_id_resuelto, area_name_resuelto, ask_payload_o_None).
-    Si falta área y 'modo_asistente' es True → ask con opciones (si hay sesión).
-    Si el nombre es ambiguo → ask con candidatas.
+    Si falta área y 'modo_asistente' es True → devuelve un 'ask' con opciones (si hay sesión).
+    Si el nombre es ambiguo → 'ask' con candidatas.
     """
     resolved_area_name: Optional[str] = None
 
     # Si viene ID, intentar resolver nombre (opcional)
     if area_id:
         try:
-            # intento de obtener nombre de la lista (opcional; si falla, seguimos con None)
             areas = client.list_stock_areas()
             for a in areas:
                 if int(a.get("id")) == int(area_id):
@@ -89,13 +91,16 @@ def _resolve_area_or_ask(
 
     # Si viene nombre, buscar coincidencias
     if area_nombre:
-        # Preferimos usar find_area_candidates si existe en el client
         try:
             match, candidates = client.find_area_candidates(area_nombre)
         except AttributeError:
-            # Si no existe, degradar a búsqueda exacta simple
             areas = client.list_stock_areas()
-            match = next(({"id": a["id"], "name": a["name"]} for a in areas if (a.get("name") or "").strip().lower() == area_nombre.strip().lower()), None)
+            match = next(
+                ({"id": a["id"], "name": a["name"]}
+                 for a in areas
+                 if (a.get("name") or "").strip().lower() == area_nombre.strip().lower()),
+                None
+            )
             candidates = []
 
         if match:
@@ -112,7 +117,6 @@ def _resolve_area_or_ask(
 
     # No llegó ni id ni nombre
     if modo_asistente:
-        # En asistente, pedimos selección (si hay sesión podremos poblar opciones desde la ruta que uses para listar áreas)
         try:
             options = [{"id": a["id"], "label": a["name"]} for a in client.list_stock_areas()][:15]
         except Exception:
@@ -129,21 +133,22 @@ def _resolve_area_or_ask(
     raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
 
 
-# --------------------------
-# KPIs por movimiento
-# --------------------------
+# ==============================================================================
+# KPIs por movimiento (DESCOMPOSITION)
+# ==============================================================================
+
 def _compute_kpis_from_detail(
     detail: Dict[str, Any],
     product_filter: Optional[List[int]],
     warnings: List[str],
 ) -> Dict[str, Any]:
     """
-    Calcula:
+    Calcula para un movimiento padre (OUT/DESCOMPOSITION) con childs:
       - usado_padre
-      - manufacturados_total (solo hijos ENTRY/DESCOMPOSITION/MANUFACTURED)
-      - merma_total (ENTRY/WASTE o type=WASTE)
-      - rendimiento_porcentaje (si misma unidad)
-      - devuelve además metadatos: padre, fecha, movementId
+      - manufacturados_total (ENTRY/DESCOMPOSITION/MANUFACTURED)
+      - merma_total       (ENTRY/WASTE o type=WASTE)
+      - rendimiento_porcentaje (si unidades coinciden)  ->  (manufacturados_total / usado_padre) * 100
+      - devuelve metadatos: padre, fecha, movementId, createdAt y desglose por producto manufacturado
     """
     parent_qty = float(abs(detail.get("quantity") or 0))
     parent_product = detail.get("product") or {}
@@ -182,7 +187,6 @@ def _compute_kpis_from_detail(
 
         # WASTE (ENTRY/WASTE o type=WASTE)
         if op == "ENTRY" and (ptype == "WASTE" or cat == "WASTE"):
-            # filtro de productos no aplica a merma
             waste_total += qty
             continue
 
@@ -192,7 +196,7 @@ def _compute_kpis_from_detail(
         if parent_qty > 0:
             rendimiento = (manuf_total / parent_qty) * 100.0
     else:
-        # detectar si hubo al menos un hijo manufacturado con unidad distinta
+        # al menos una unidad distinta
         if any((v["measure"] and parent_measure and v["measure"] != parent_measure) for v in manuf_by_product.values()):
             warnings.append(
                 f"Unidades distintas en movementId={movement_id}: padre={parent_measure}, hijos={[v['measure'] for v in manuf_by_product.values()]}"
@@ -230,9 +234,10 @@ def _stats(values: List[float]) -> Tuple[Optional[float], Optional[float], Optio
     return round(prom, 2), round(minv, 2), round(maxv, 2), round(std, 2)
 
 
-# --------------------------
+# ==============================================================================
 # SERVICE
-# --------------------------
+# ==============================================================================
+
 def rendimiento_descomposicion_service(
     *,
     body: Dict[str, Any],
@@ -242,9 +247,10 @@ def rendimiento_descomposicion_service(
     Resuelve POST /rendimientoDescomposicion
     - Valida contexto
     - Resuelve área (id/nombre) con 'ask' si aplica
-    - Lista padres OUT/DESCOMPOSITION (paginado)
-    - Detalle por movimiento y KPIs
-    - Agregados por bucket (DIA/SEMANA/MES) y por producto
+    - Lista padres OUT/DESCOMPOSITION (paginado por fechas - chunking)
+    - Obtiene detalle por movimiento en paralelo y calcula KPIs
+    - Agrega por bucket (DIA/SEMANA/MES) y por producto
+    - Soporta rangos largos (ej. 1 año) con bajo uso de memoria (streaming)
     """
     usuario = body.get("usuario")
     if not usuario:
@@ -276,7 +282,6 @@ def rendimiento_descomposicion_service(
     if ask_payload:
         return ask_payload
     if not area_id:
-        # Defensa adicional (no debería ocurrir aquí)
         raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
 
     # 4) Fechas de trabajo
@@ -291,13 +296,13 @@ def rendimiento_descomposicion_service(
     elif fecha_fin and not fecha_inicio:
         fecha_inicio = fecha_fin
 
-    # Guardamos rango normalizado (coherencia de proyecto), aunque Tecopos usará sólo la parte fecha
     fi_dt = _parse_yyyy_mm_dd(fecha_inicio)
     ff_dt = _parse_yyyy_mm_dd(fecha_fin)
+    # Normalización informativa 00:01–23:59 (coherencia de proyecto)
     _df, _dt = normalizar_rango(
         datetime.combine(fi_dt, datetime.min.time()),
         datetime.combine(ff_dt, datetime.min.time()),
-    )  # devuelve "YYYY-MM-DD HH:MM" (informativo)
+    )
 
     # 5) Filtros/flags
     granularidad = (body.get("granularidad") or "DIA").upper()
@@ -313,78 +318,14 @@ def rendimiento_descomposicion_service(
 
     incluir_movs = bool(body.get("incluir_movimientos", False))
 
-    # 6) Listar padres (paginación) y computar KPIs por movimiento
-   body: Dict[str, Any],
-    http: Client = Depends(get_http_client),
-) -> Dict[str, Any]:
-    # ===== 0) Previo: (tu bloque existente 1–5) =====
-    usuario = body.get("usuario")
-    if not usuario:
-        raise HTTPException(status_code=400, detail="Falta 'usuario'")
-
-    ctx = get_user_context(usuario)
-    if not ctx:
-        raise HTTPException(status_code=403, detail="Usuario no autenticado")
-
-    client = RendimientoDescomposicionClient(
-        region=ctx["region"],
-        token=ctx["token"],
-        business_id=ctx["businessId"],
-    )
-
-    area_id_in = body.get("area_id")
-    area_nombre = body.get("area_nombre")
-    modo_asistente = bool(body.get("modo_asistente")) or bool(body.get("texto"))
-    area_id, resolved_area_name, ask_payload = _resolve_area_or_ask(
-        client=client,
-        area_id=area_id_in,
-        area_nombre=area_nombre,
-        modo_asistente=modo_asistente,
-    )
-    if ask_payload:
-        return ask_payload
-    if not area_id:
-        raise HTTPException(status_code=400, detail="Debes enviar 'area_id' o 'area_nombre'")
-
-    fecha_inicio = body.get("fecha_inicio")
-    fecha_fin = body.get("fecha_fin")
-    if not fecha_inicio and not fecha_fin:
-        today = _today_ny()
-        fecha_inicio = today.strftime("%Y-%m-%d")
-        fecha_fin = fecha_inicio
-    elif fecha_inicio and not fecha_fin:
-        fecha_fin = fecha_inicio
-    elif fecha_fin and not fecha_inicio:
-        fecha_inicio = fecha_fin
-
-    fi_dt = _parse_yyyy_mm_dd(fecha_inicio)
-    ff_dt = _parse_yyyy_mm_dd(fecha_fin)
-    _df, _dt = normalizar_rango(
-        datetime.combine(fi_dt, datetime.min.time()),
-        datetime.combine(ff_dt, datetime.min.time()),
-    )
-
-    granularidad = (body.get("granularidad") or "DIA").upper()
-    if granularidad not in {"DIA", "SEMANA", "MES"}:
-        granularidad = "DIA"
-
-    product_filter = body.get("product_ids") or None
-    if product_filter:
-        try:
-            product_filter = [int(x) for x in product_filter]
-        except Exception:
-            raise HTTPException(status_code=400, detail="'product_ids' debe ser una lista de enteros")
-
-    incluir_movs = bool(body.get("incluir_movimientos", False))
-
-    # ===== 1) Parámetros de escalabilidad =====
+    # 6) Parámetros de escalabilidad
     chunk_days = int(body.get("chunk_days") or 30)          # días por ventana
     max_concurrency = int(body.get("max_concurrency") or 8) # hilos para detalles
     modo_agregado = bool(body.get("modo_agregado", False))  # fuerza no guardar movimientos
     if modo_agregado:
         incluir_movs = False
 
-    # ===== 2) Acumuladores en streaming =====
+    # 7) Acumuladores en streaming
     total_usado = 0.0
     total_manuf = 0.0
     total_merma = 0.0
@@ -410,27 +351,28 @@ def rendimiento_descomposicion_service(
             warnings.append(f"Error al obtener detalle movementId={mid}: {e}")
             return None
 
-    # ===== 3) Chunking de fechas + paginación + paralelismo =====
-    cur = fi_dt
-    one_day = timedelta(days=1)
+    # 8) Chunking de fechas + paginación + paralelismo (pool único)
+    executor = ThreadPoolExecutor(max_workers=max_concurrency)
+    try:
+        cur = fi_dt
+        one_day = timedelta(days=1)
 
-    while cur <= ff_dt:
-        chunk_end = min(cur + timedelta(days=chunk_days - 1), ff_dt)
+        while cur <= ff_dt:
+            chunk_end = min(cur + timedelta(days=chunk_days - 1), ff_dt)
 
-        ids_en_chunk: List[int] = []
-        for page_items in client.iter_parent_movements(
-            area_id=area_id,
-            date_from=cur.strftime("%Y-%m-%d"),
-            date_to=chunk_end.strftime("%Y-%m-%d"),
-        ):
-            for it in page_items:
-                mid = it.get("id")
-                if mid is not None:
-                    ids_en_chunk.append(int(mid))
+            ids_en_chunk: List[int] = []
+            for page_items in client.iter_parent_movements(
+                area_id=area_id,
+                date_from=cur.strftime("%Y-%m-%d"),
+                date_to=chunk_end.strftime("%Y-%m-%d"),
+            ):
+                for it in page_items:
+                    mid = it.get("id")
+                    if mid is not None:
+                        ids_en_chunk.append(int(mid))
 
-        if ids_en_chunk:
-            with ThreadPoolExecutor(max_workers=max_concurrency) as ex:
-                futures = [ex.submit(_fetch_detail, mid) for mid in ids_en_chunk]
+            if ids_en_chunk:
+                futures = [executor.submit(_fetch_detail, mid) for mid in ids_en_chunk]
                 for fut in as_completed(futures):
                     kpi = fut.result()
                     if not kpi:
@@ -470,9 +412,11 @@ def rendimiento_descomposicion_service(
                             "rendimiento_porcentaje": kpi["rendimiento_porcentaje"],
                         })
 
-        cur = chunk_end + one_day
+            cur = chunk_end + one_day
+    finally:
+        executor.shutdown(wait=True)
 
-    # ===== 4) Cierre de agregados =====
+    # 9) Cierre de agregados
     rend_ponderado = round((total_manuf / total_usado) * 100.0, 2) if total_usado > 0 else None
 
     series_ratio: Dict[str, Optional[float]] = {}
@@ -484,8 +428,8 @@ def rendimiento_descomposicion_service(
         {
             "bucket": b,
             "padre_usado": round(vals["usado"], 4),
-            "manufacturados": round(vals["manuf"], 4),
-            "merma": round(vals["merma"], 4),
+            "manufacturados": round(vals["manuf"] or 0.0, 4),
+            "merma": round(vals["merma"] or 0.0, 4),
             "rendimiento_porcentaje": series_ratio[b],
         }
         for b, vals in sorted(series_aggr.items(), key=lambda kv: kv[0])
@@ -532,3 +476,5 @@ def rendimiento_descomposicion_service(
         "movimientos": (movimientos_kpi or []) if incluir_movs else [],
         "warnings": warnings,
     }
+
+
