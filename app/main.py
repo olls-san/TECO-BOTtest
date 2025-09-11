@@ -1,15 +1,7 @@
-"""
-main.py
--------
-
-Application entrypoint. Creates the FastAPI instance, configures
-lifespan events to instantiate the shared HTTP client and registers
-all routers. The default response class uses ORJSON for faster
-serialization. Middlewares can be added here as necessary.
-"""
-
+# main.py
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import ORJSONResponse
 
@@ -24,19 +16,19 @@ from app.routes.rendimiento import router as rendimiento_router
 from app.routes.inventario import router as inventario_router
 from app.routes import rendimiento_descomposicion as rendimiento_descomposicion_routes
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # crear y compartir el cliente HTTP
+    app.state.http_client = HTTPClient()  # conexiones reutilizadas
+    try:
+        yield
+    finally:
+        app.state.http_client.close()
+
 def create_app() -> FastAPI:
-    app = FastAPI(default_response_class=ORJSONResponse)
-    # create http client during startup and close on shutdown
-    @app.on_event("startup")
-    def startup_event() -> None:
-        app.state.http_client = HTTPClient()  # CHANGED: reuse connections via singleton
+    app = FastAPI(default_response_class=ORJSONResponse, lifespan=lifespan)
 
-    @app.on_event("shutdown")
-    def shutdown_event() -> None:
-        client: HTTPClient = app.state.http_client
-        client.close()
-
-    # register routers
+    # registrar routers
     app.include_router(auth_router)
     app.include_router(products_router)
     app.include_router(reports_router)
@@ -48,5 +40,5 @@ def create_app() -> FastAPI:
     app.include_router(rendimiento_descomposicion_routes.router)
     return app
 
-
 app = create_app()
+
