@@ -9,17 +9,6 @@ to keep the route handlers thin and delegate complex flows to this
 module.
 """
 
-"""
-services/product_service.py
----------------------------
-
-Contains business logic for creating products, intelligent entries and
-categorisation. These functions leverage the shared HTTP client and
-centralised authentication helpers to perform API calls. The goal is
-to keep the route handlers thin and delegate complex flows to this
-module.
-"""
-
 from __future__ import annotations
 
 from typing import Dict, Any, List, Optional, Tuple, Literal
