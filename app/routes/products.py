@@ -65,3 +65,9 @@ def post_crear_producto_con_categoria(payload: dict, http_client: HTTPClient = D
 def post_entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient = Depends(get_http_client)):
     return entrada_inteligente(data, http_client)
 
+
+
+@router.post("/entrada-inteligente")
+def post_entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient = Depends(get_http_client)):
+    return entrada_inteligente(data, http_client)
+
