@@ -20,6 +20,8 @@ from app.clients.http_client import HTTPClient
 from app.schemas.products import Producto, ProductoEntradaInteligente, EntradaInteligenteRequest
 
 from collections import defaultdict
+import unicodedata
+import re
 
 # =======================
 # Mapeos de categorías
@@ -37,21 +39,28 @@ CATEGORIA_KEYWORDS: Dict[str, List[str]] = {
 }
 
 # Tipos confirmados de Tecopos
-TipoProducto = Literal["RAW", "MANUFACTURED", "ADDON", "MENU", "COMBO", "SERVICE"]
+TipoProducto = Literal["RAW", "MANUFACTURED", "ADDON", "MENU", "COMBO", "SERVICE", "STOCK"]
 
 
 # =======================
 # Helpers generales
 # =======================
 
+def _strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
 def normalizar(texto: str) -> str:
-    return texto.strip().lower()
+    if not texto:
+        return ""
+    t = _strip_accents(texto).lower().strip()
+    t = re.sub(r"\s+", " ", t)
+    return t
 
 
 def inferir_categoria(nombre: str) -> str:
     nombre_norm = normalizar(nombre)
     for categoria, palabras_clave in CATEGORIA_KEYWORDS.items():
-        if any(p in nombre_norm for p in palabras_clave):
+        if any(normalizar(p) in nombre_norm for p in palabras_clave):
             return categoria
     return "Mercado"
 
@@ -67,6 +76,52 @@ def _get_ctx_headers(usuario: str) -> Tuple[Dict[str, Any], str, Dict[str, str]]
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     return ctx, base_url, headers
 
+
+# --- Tipos Tecopos y mapeo “amigable” ---
+TIPOS_TECOPOS = {"RAW", "MANUFACTURED", "ADDON", "MENU", "COMBO", "SERVICE", "STOCK"}
+
+FRIENDLY_TO_TECOPOS = {
+    # nombres “humanos” → type Tecopos (tras normalizar)
+    "elaborado": "MENU",
+    "procesado": "MANUFACTURED",
+    "almacen": "STOCK",
+    "materia prima": "RAW",
+    "combo": "COMBO",
+    # opcionales/sinónimos:
+    "menu": "MENU",
+    "manufactured": "MANUFACTURED",
+    "raw": "RAW",
+    "service": "SERVICE",
+    "servicio": "SERVICE",
+    "addon": "ADDON",
+}
+
+def coerce_tipo(valor: Optional[str], *, default_: Optional[str] = None) -> str:
+    """
+    Acepta: 'tipo' o 'type' con variantes humanas (Elaborado, Procesado, Almacén...).
+    Devuelve el enum Tecopos válido en MAYÚSCULAS. Lanza 422 si no reconoce el valor.
+    """
+    if not valor:
+        if default_:
+            return default_.upper()
+        raise HTTPException(status_code=422, detail="Campo 'tipo'/'type' es obligatorio.")
+    v_raw = str(valor).strip()
+    v_norm = normalizar(v_raw)
+    # ¿ya es un enum válido?
+    if v_raw.upper() in TIPOS_TECOPOS:
+        return v_raw.upper()
+    # ¿está en el diccionario amigable?
+    mapped = FRIENDLY_TO_TECOPOS.get(v_norm)
+    if mapped:
+        return mapped
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": f"Tipo desconocido: '{valor}'",
+            "permitidos": sorted(list(TIPOS_TECOPOS)),
+            "alias": sorted(list(FRIENDLY_TO_TECOPOS.keys())),
+        },
+    )
 
 # =======================
 # Categorías (existente)
@@ -114,7 +169,7 @@ def crear_o_buscar_producto(producto: ProductoEntradaInteligente, base_url: str,
         return existente["id"]
     # create new product (tipo STOCK conservado según tu base actual)
     categoria_id = obtener_o_crear_categoria(inferir_categoria(producto.nombre), base_url, headers, http_client)
-    crear_url = f"{base_url}/api/v1/administration/product"
+    crear_url = f"{base_url}/api/v1/administration/product"}
     crear_payload = {
         "type": "STOCK",
         "name": producto.nombre,
@@ -135,11 +190,15 @@ def crear_producto_con_categoria(data: Producto, http_client: HTTPClient) -> Dic
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+
+    # Acepta tipo humano o enum y lo normaliza (default STOCK)
+    tipo = coerce_tipo(getattr(data, "tipo", None) or "STOCK", default_="STOCK")
+
     categoria_nombre = data.categorias[0] if data.categorias else inferir_categoria(data.nombre)
     categoria_id = obtener_o_crear_categoria(categoria_nombre, base_url, headers, http_client)
     crear_url = f"{base_url}/api/v1/administration/product"
     crear_payload = {
-        "type": data.tipo,
+        "type": tipo,
         "name": data.nombre,
         "prices": [
             {
@@ -357,13 +416,23 @@ def crear_producto_teco(usuario: str, data: Dict[str, Any], http_client: HTTPCli
     """
     Crea un producto en Tecopos (tipos confirmados) y retorna {id, name, type}.
     Soporta 'productionAreaNames' (nombres) o 'listProductionAreas' (IDs).
+    Acepta claves 'type' o 'tipo', y 'name' o 'nombre'.
     """
-    ctx, base_url, headers = _get_ctx_headers(usuario)
+    _, base_url, headers = _get_ctx_headers(usuario)
     crear_url = f"{base_url}/api/v1/administration/product"
 
+    # Acepta 'type' o 'tipo'
+    raw_tipo = data.get("type") or data.get("tipo")
+    tipo = coerce_tipo(raw_tipo)
+
+    # Acepta 'name' o 'nombre'
+    _name = data.get("name") or data.get("nombre")
+    if not _name:
+        raise HTTPException(status_code=422, detail="Campo 'name'/'nombre' es obligatorio.")
+
     payload = _build_payload_teco(
-        type=data["type"],
-        name=data["name"],
+        type=tipo,  # type: ignore[arg-type]
+        name=_name,
         images=data.get("images"),
         measure=data.get("measure"),
         salesCategoryId=data.get("salesCategoryId"),
@@ -382,8 +451,8 @@ def crear_producto_teco(usuario: str, data: Dict[str, Any], http_client: HTTPCli
     body = res.json() or {}
     return {
         "id": int(body.get("id") or body.get("productId") or 0),
-        "name": str(body.get("name") or data["name"]),
-        "type": str(body.get("type") or data["type"]),
+        "name": str(body.get("name") or _name),
+        "type": str(body.get("type") or tipo),
     }
 
 
@@ -392,23 +461,27 @@ def crear_productos_teco_batch(usuario: str, items: List[Dict[str, Any]], http_c
     Batch **cliente**: itera la lista y crea cada producto de forma secuencial.
     - Si un ítem falla, continúa con el resto.
     - Devuelve {'creados': [...], 'errores': [...]}
+    Acepta por ítem 'type' o 'tipo', y 'name' o 'nombre'.
     """
     creados: List[Dict[str, Any]] = []
     errores: List[Dict[str, Any]] = []
 
-    # Prevalidación mínima (opcional)
     valid_items: List[Dict[str, Any]] = []
     for idx, it in enumerate(items, start=1):
-        if "type" not in it or "name" not in it:
+        # Prevalidación flexible
+        raw_tipo = it.get("type") or it.get("tipo")
+        raw_name = it.get("name") or it.get("nombre")
+        if not raw_tipo or not raw_name:
             errores.append({
                 "index": idx,
-                "name": it.get("name"),
-                "type": it.get("type"),
+                "name": raw_name,
+                "type": raw_tipo,
                 "status": 422,
-                "error": "Faltan campos mínimos: 'type' y/o 'name'."
+                "error": "Faltan campos mínimos: 'type'/'tipo' y/o 'name'/'nombre'."
             })
-        else:
-            valid_items.append(it)
+            continue
+        # Deja que crear_producto_teco haga la coerción y validación profunda
+        valid_items.append(it)
 
     # Crear uno a uno
     for it in valid_items:
@@ -417,15 +490,15 @@ def crear_productos_teco_batch(usuario: str, items: List[Dict[str, Any]], http_c
             creados.append(res)
         except HTTPException as e:
             errores.append({
-                "name": it.get("name"),
-                "type": it.get("type"),
+                "name": it.get("name") or it.get("nombre"),
+                "type": it.get("type") or it.get("tipo"),
                 "status": e.status_code,
                 "error": e.detail,
             })
         except Exception as e:
             errores.append({
-                "name": it.get("name"),
-                "type": it.get("type"),
+                "name": it.get("name") or it.get("nombre"),
+                "type": it.get("type") or it.get("tipo"),
                 "status": 500,
                 "error": str(e),
             })
