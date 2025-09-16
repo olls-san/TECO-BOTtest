@@ -127,29 +127,32 @@ def coerce_tipo(valor: Optional[str], *, default_: Optional[str] = None) -> str:
 # Categorías (existente)
 # =======================
 
-def obtener_o_crear_categoria(nombre_categoria: str, base_url: str, headers: Dict[str, str], http_client: HTTPClient) -> int:
-    """Retrieve or create a sales category by name."""
-    cat_url = f"{base_url}/api/v1/administration/salescategory"
-    res = http_client.request("GET", cat_url, headers=headers)
+def crear_o_buscar_producto(producto: ProductoEntradaInteligente, base_url: str, headers: Dict[str, str], http_client: HTTPClient) -> int:
+    """Find an existing product by name or create a new one."""
+    nombre_norm = normalizar(producto.nombre)
+    search_url = f"{base_url}/api/v1/administration/product?search={producto.nombre}"
+    res = http_client.request("GET", search_url, headers=headers)
     if res.status_code != 200:
-        raise HTTPException(status_code=500, detail="No se pudieron consultar las categorías")
-    categorias = res.json().get("items", [])
-    existente = next((c for c in categorias if normalizar(c.get("name", "")) == normalizar(nombre_categoria)), None)
+        raise HTTPException(status_code=500, detail=f"No se pudo buscar '{producto.nombre}'")
+    items = res.json().get("items", [])
+    existente = next((p for p in items if normalizar(p.get("name", "")) == nombre_norm), None)
     if existente:
         return existente["id"]
-    # create category
-    crear_res = http_client.request("POST", cat_url, headers=headers, json={"name": nombre_categoria})
+    # create new product (tipo STOCK conservado según tu base actual)
+    categoria_id = obtener_o_crear_categoria(inferir_categoria(producto.nombre), base_url, headers, http_client)
+    crear_url = f"{base_url}/api/v1/administration/product"
+    crear_payload = {
+        "type": "STOCK",
+        "name": producto.nombre,
+        "prices": [{"price": producto.precio, "codeCurrency": producto.moneda}],
+        "images": [],
+        "salesCategoryId": categoria_id,
+    }
+    crear_res = http_client.request("POST", crear_url, headers=headers, json=crear_payload)
     if crear_res.status_code not in [200, 201]:
-        raise HTTPException(status_code=500, detail="No se pudo crear la categoría")
-    # fetch again to confirm
-    res = http_client.request("GET", cat_url, headers=headers)
-    if res.status_code != 200:
-        raise HTTPException(status_code=500, detail="No se pudieron volver a consultar las categorías")
-    categorias = res.json().get("items", [])
-    creada = next((c for c in categorias if normalizar(c.get("name", "")) == normalizar(nombre_categoria)), None)
-    if not creada:
-        raise HTTPException(status_code=500, detail="Categoría creada pero no encontrada")
-    return creada["id"]
+        raise HTTPException(status_code=500, detail=f"No se pudo crear '{producto.nombre}'")
+    return crear_res.json().get("id")
+
 
 
 # =======================
