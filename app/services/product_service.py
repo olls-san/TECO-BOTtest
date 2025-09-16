@@ -172,7 +172,7 @@ def crear_o_buscar_producto(producto: ProductoEntradaInteligente, base_url: str,
         return existente["id"]
     # create new product (tipo STOCK conservado según tu base actual)
     categoria_id = obtener_o_crear_categoria(inferir_categoria(producto.nombre), base_url, headers, http_client)
-    crear_url = f"{base_url}/api/v1/administration/product"}
+    crear_url = f"{base_url}/api/v1/administration/product"
     crear_payload = {
         "type": "STOCK",
         "name": producto.nombre,
