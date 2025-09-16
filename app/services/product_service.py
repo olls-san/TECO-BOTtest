@@ -41,7 +41,6 @@ CATEGORIA_KEYWORDS: Dict[str, List[str]] = {
 # Tipos confirmados de Tecopos
 TipoProducto = Literal["RAW", "MANUFACTURED", "ADDON", "MENU", "COMBO", "SERVICE", "STOCK"]
 
-
 # =======================
 # Helpers generales
 # =======================
@@ -56,14 +55,12 @@ def normalizar(texto: str) -> str:
     t = re.sub(r"\s+", " ", t)
     return t
 
-
 def inferir_categoria(nombre: str) -> str:
     nombre_norm = normalizar(nombre)
     for categoria, palabras_clave in CATEGORIA_KEYWORDS.items():
         if any(normalizar(p) in nombre_norm for p in palabras_clave):
             return categoria
     return "Mercado"
-
 
 def _get_ctx_headers(usuario: str) -> Tuple[Dict[str, Any], str, Dict[str, str]]:
     """
@@ -75,7 +72,6 @@ def _get_ctx_headers(usuario: str) -> Tuple[Dict[str, Any], str, Dict[str, str]]
     base_url = get_base_url(ctx["region"])
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
     return ctx, base_url, headers
-
 
 # --- Tipos Tecopos y mapeo “amigable” ---
 TIPOS_TECOPOS = {"RAW", "MANUFACTURED", "ADDON", "MENU", "COMBO", "SERVICE", "STOCK"}
@@ -124,7 +120,35 @@ def coerce_tipo(valor: Optional[str], *, default_: Optional[str] = None) -> str:
     )
 
 # =======================
-# Categorías (existente)
+# Categorías
+# =======================
+
+def obtener_o_crear_categoria(nombre_categoria: str, base_url: str, headers: Dict[str, str], http_client: HTTPClient) -> int:
+    """Retrieve or create a sales category by name."""
+    cat_url = f"{base_url}/api/v1/administration/salescategory"
+    res = http_client.request("GET", cat_url, headers=headers)
+    if res.status_code != 200:
+        raise HTTPException(status_code=500, detail="No se pudieron consultar las categorías")
+    categorias = res.json().get("items", [])
+    existente = next((c for c in categorias if normalizar(c.get("name", "")) == normalizar(nombre_categoria)), None)
+    if existente:
+        return existente["id"]
+    # create category
+    crear_res = http_client.request("POST", cat_url, headers=headers, json={"name": nombre_categoria})
+    if crear_res.status_code not in [200, 201]:
+        raise HTTPException(status_code=500, detail="No se pudo crear la categoría")
+    # fetch again to confirm
+    res = http_client.request("GET", cat_url, headers=headers)
+    if res.status_code != 200:
+        raise HTTPException(status_code=500, detail="No se pudieron volver a consultar las categorías")
+    categorias = res.json().get("items", [])
+    creada = next((c for c in categorias if normalizar(c.get("name", "")) == normalizar(nombre_categoria)), None)
+    if not creada:
+        raise HTTPException(status_code=500, detail="Categoría creada pero no encontrada")
+    return creada["id"]
+
+# =======================
+# Productos
 # =======================
 
 def crear_o_buscar_producto(producto: ProductoEntradaInteligente, base_url: str, headers: Dict[str, str], http_client: HTTPClient) -> int:
@@ -152,39 +176,6 @@ def crear_o_buscar_producto(producto: ProductoEntradaInteligente, base_url: str,
     if crear_res.status_code not in [200, 201]:
         raise HTTPException(status_code=500, detail=f"No se pudo crear '{producto.nombre}'")
     return crear_res.json().get("id")
-
-
-
-# =======================
-# Productos (existente)
-# =======================
-
-def crear_o_buscar_producto(producto: ProductoEntradaInteligente, base_url: str, headers: Dict[str, str], http_client: HTTPClient) -> int:
-    """Find an existing product by name or create a new one."""
-    nombre_norm = normalizar(producto.nombre)
-    search_url = f"{base_url}/api/v1/administration/product?search={producto.nombre}"
-    res = http_client.request("GET", search_url, headers=headers)
-    if res.status_code != 200:
-        raise HTTPException(status_code=500, detail=f"No se pudo buscar '{producto.nombre}'")
-    items = res.json().get("items", [])
-    existente = next((p for p in items if normalizar(p.get("name", "")) == nombre_norm), None)
-    if existente:
-        return existente["id"]
-    # create new product (tipo STOCK conservado según tu base actual)
-    categoria_id = obtener_o_crear_categoria(inferir_categoria(producto.nombre), base_url, headers, http_client)
-    crear_url = f"{base_url}/api/v1/administration/product"
-    crear_payload = {
-        "type": "STOCK",
-        "name": producto.nombre,
-        "prices": [{"price": producto.precio, "codeCurrency": producto.moneda}],
-        "images": [],
-        "salesCategoryId": categoria_id,
-    }
-    crear_res = http_client.request("POST", crear_url, headers=headers, json=crear_payload)
-    if crear_res.status_code not in [200, 201]:
-        raise HTTPException(status_code=500, detail=f"No se pudo crear '{producto.nombre}'")
-    return crear_res.json().get("id")
-
 
 def crear_producto_con_categoria(data: Producto, http_client: HTTPClient) -> Dict[str, Any]:
     """Create a new product under a specific or inferred category."""
@@ -221,9 +212,8 @@ def crear_producto_con_categoria(data: Producto, http_client: HTTPClient) -> Dic
         "respuesta": crear_res.json(),
     }
 
-
 # =======================
-# Entrada Inteligente (existente)
+# Entrada Inteligente
 # =======================
 
 def entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient) -> Dict[str, Any]:
@@ -266,9 +256,8 @@ def entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient
         "productos_procesados": procesados,
     }
 
-
 # =========================================================
-# NUEVO: Áreas MANUFACTURER (listar + resolver por nombre)
+# Áreas MANUFACTURER (listar + resolver por nombre)
 # =========================================================
 
 def listar_areas_manufacturer(usuario: str, http_client: HTTPClient) -> List[Dict[str, Any]]:
@@ -295,7 +284,6 @@ def listar_areas_manufacturer(usuario: str, http_client: HTTPClient) -> List[Dic
             break
         page += 1
     return items
-
 
 def resolver_area_ids_por_nombre(usuario: str, nombres: List[str], http_client: HTTPClient) -> List[int]:
     """
@@ -330,9 +318,8 @@ def resolver_area_ids_por_nombre(usuario: str, nombres: List[str], http_client: 
         )
     return result
 
-
 # =========================================================
-# NUEVO: Construcción de payload por tipo (productos Tecopos)
+# Construcción de payload por tipo (productos Tecopos)
 # =========================================================
 
 def _build_payload_teco(
@@ -380,7 +367,7 @@ def _build_payload_teco(
             payload["listProductionAreas"] = list_prod_areas_ids
         return payload
 
-    # Tipos de venta
+    # Tipos de venta (incluye STOCK, ADDON, MENU, COMBO, SERVICE)
     if salesCategoryId is None:
         raise HTTPException(status_code=422, detail=f"Para type='{type}' es obligatorio 'salesCategoryId'.")
     precios = prices or []
@@ -410,9 +397,8 @@ def _build_payload_teco(
     # Limpiar None
     return {k: v for k, v in payload.items() if v is not None}
 
-
 # =========================================================
-# NUEVO: Crear producto (uno y batch iterando)
+# Crear producto (uno y batch iterando)
 # =========================================================
 
 def crear_producto_teco(usuario: str, data: Dict[str, Any], http_client: HTTPClient) -> Dict[str, Any]:
@@ -457,7 +443,6 @@ def crear_producto_teco(usuario: str, data: Dict[str, Any], http_client: HTTPCli
         "name": str(body.get("name") or _name),
         "type": str(body.get("type") or tipo),
     }
-
 
 def crear_productos_teco_batch(usuario: str, items: List[Dict[str, Any]], http_client: HTTPClient) -> Dict[str, Any]:
     """
@@ -507,3 +492,4 @@ def crear_productos_teco_batch(usuario: str, items: List[Dict[str, Any]], http_c
             })
 
     return {"creados": creados, "errores": errores}
+
