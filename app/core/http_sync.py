@@ -18,6 +18,13 @@ from typing import Dict, Any, Optional, Tuple
 import httpx
 from fastapi import HTTPException
 import requests
+import json
+import time
+
+# Import logging helpers to record outbound requests.  These
+# functions remove sensitive information from headers and serialise
+# messages as JSON.  See app/logging_config.py for details.
+from app.logging_config import log_http_request, logger
 
 # Default timeouts for requests: (connect timeout, read timeout)
 DEFAULT_TIMEOUT: Tuple[float, float] = (10.0, 30.0)
@@ -86,10 +93,31 @@ def teco_request(
         The final HTTP response.
     """
     attempt = 0
+    # Ensure we do not leak sensitive headers
+    safe_headers = {k: v for k, v in headers.items() if k.lower() not in {"authorization", "x-app-businessid"}}
+    start_time = time.time()
+    # Log the request at debug level before sending
+    log_http_request(method.upper(), url, headers=safe_headers, params=params, json_body=json)
     while True:
-        resp = requests.request(method=method, url=url, headers=headers, params=params, json=json, timeout=timeout)
+        try:
+            resp = requests.request(method=method, url=url, headers=headers, params=params, json=json, timeout=timeout)
+        except Exception as exc:
+            # Log the exception
+            duration_ms = (time.time() - start_time) * 1000
+            logger.error(json.dumps({
+                "event": "http_error",
+                "method": method.upper(),
+                "url": url,
+                "detail": str(exc),
+            }), exc_info=True)
+            log_http_request(method.upper(), url, headers=safe_headers, params=params, json_body=json, status=None, duration_ms=duration_ms)
+            raise
+        # Check if retry is needed
         if resp.status_code in RETRY_STATUS and attempt < retries:
             attempt += 1
             time.sleep(backoff_base * (2 ** (attempt - 1)))
             continue
+        # Log completion
+        duration_ms = (time.time() - start_time) * 1000
+        log_http_request(method.upper(), url, headers=safe_headers, params=params, json_body=json, status=resp.status_code, duration_ms=duration_ms)
         return resp

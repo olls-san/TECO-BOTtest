@@ -24,6 +24,8 @@ from fastapi import HTTPException
 from app.core.context import get_user_context
 from app.core.auth import get_base_url, build_auth_headers
 from app.clients.http_client import HTTPClient
+from app.logging_config import logger, log_call
+import json
 from app.utils.cache import cache
 
 # -------------------------------
@@ -150,6 +152,7 @@ def generar_pdf_inventario(productos: List[Dict[str, Any]]) -> BytesIO:
 # -------------------------------
 # Servicio principal
 # -------------------------------
+@log_call
 def totalizar_inventario(
     usuario: str,
     enviar_por_correo: bool,
@@ -169,7 +172,24 @@ def totalizar_inventario(
     # 1) Contexto Tecopos
     ctx = get_user_context(usuario)
     if not ctx:
+        logger.warning(json.dumps({
+            "event": "totalizar_inventario_sin_sesion",
+            "usuario": usuario,
+            "detalle": "Usuario no autenticado",
+        }))
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
+    # Log inicio del proceso
+    try:
+        logger.info(json.dumps({
+            "event": "totalizar_inventario_inicio",
+            "usuario": usuario,
+            "region": ctx.get("region"),
+            "businessId": ctx.get("businessId"),
+            "enviar_por_correo": enviar_por_correo,
+            "formato": formato,
+        }))
+    except Exception:
+        pass
 
     base_url = get_base_url(ctx["region"])
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
@@ -186,11 +206,21 @@ def totalizar_inventario(
 
     # 4) Validaciones
     if not productos_filtrados:
+        logger.warning(json.dumps({
+            "event": "totalizar_inventario_sin_productos",
+            "usuario": usuario,
+            "detalle": "No hay productos con disponibilidad",
+        }))
         raise HTTPException(status_code=404, detail="No hay productos con disponibilidad")
 
     # 5) Envío de correo (opcional)
     if enviar_por_correo and destinatario:
         if not enviar_correo:
+            logger.error(json.dumps({
+                "event": "totalizar_inventario_error_correo",
+                "usuario": usuario,
+                "detalle": "Módulo de correo no disponible (email_utils)",
+            }))
             raise HTTPException(status_code=500, detail="Módulo de correo no disponible (email_utils)")
 
         if formato.lower() == "excel":
@@ -212,6 +242,11 @@ def totalizar_inventario(
 
         # Verificación defensiva: tamaño > 0
         if not archivo_bytes or len(archivo_bytes) == 0:
+            logger.error(json.dumps({
+                "event": "totalizar_inventario_error_adjunto",
+                "usuario": usuario,
+                "detalle": "Adjunto vacío; verificar generación del archivo",
+            }))
             raise HTTPException(status_code=500, detail="Adjunto vacío; verificar generación del archivo")
 
         # Enviar correo (adjunto como bytes)
@@ -223,8 +258,21 @@ def totalizar_inventario(
             nombre_archivo=nombre_archivo,
             tipo_mime=tipo_mime,
         )
+        # Log envío de correo exitoso
+        logger.info(json.dumps({
+            "event": "totalizar_inventario_correo_enviado",
+            "usuario": usuario,
+            "destinatario": destinatario,
+            "formato": formato,
+        }))
 
     # 6) Respuesta
+    # Log finalización del totalizado
+    logger.info(json.dumps({
+        "event": "totalizar_inventario_fin",
+        "usuario": usuario,
+        "total_productos": len(productos_filtrados),
+    }))
     return {
         "total": len(productos_filtrados),
         "productos": productos_filtrados,

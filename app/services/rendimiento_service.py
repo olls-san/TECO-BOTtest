@@ -17,6 +17,8 @@ from fastapi import HTTPException
 from app.core.context import get_user_context
 from app.core.auth import get_base_url, build_auth_headers
 from app.clients.http_client import HTTPClient
+from app.logging_config import logger, log_call
+import json
 from app.schemas.rendimiento import (
     RendimientoHeladoRequest,
     RendimientoYogurtRequest,
@@ -32,20 +34,50 @@ def extraer_sabor(nombre_producto: str) -> str:
     return nombre_producto
 
 
+@log_call
 def rendimiento_helado(data: RendimientoHeladoRequest, http_client: HTTPClient) -> Dict[str, Any]:
     ctx = get_user_context(data.usuario)
     if not ctx:
+        logger.warning(json.dumps({
+            "event": "rendimiento_helado_sin_sesion",
+            "usuario": data.usuario,
+            "detalle": "Usuario no autenticado",
+        }))
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+    # Log inicio del cálculo de rendimiento de helado
+    try:
+        logger.info(json.dumps({
+            "event": "rendimiento_helado_inicio",
+            "usuario": data.usuario,
+            "region": ctx.get("region"),
+            "businessId": ctx.get("businessId"),
+            "area_nombre": data.area_nombre,
+            "fecha_inicio": str(data.fecha_inicio),
+            "fecha_fin": str(data.fecha_fin),
+        }))
+    except Exception:
+        pass
     # paso 1: obtener área por nombre
     url_areas = f"{base_url}/api/v1/administration/area?page=1&type=STOCK"
     response_areas = http_client.request("GET", url_areas, headers=headers)
     if response_areas.status_code != 200:
+        logger.error(json.dumps({
+            "event": "rendimiento_helado_error",
+            "usuario": data.usuario,
+            "detalle": "No se pudieron obtener las áreas",
+            "status_code": response_areas.status_code,
+        }))
         raise HTTPException(status_code=500, detail="No se pudieron obtener las áreas")
     areas = response_areas.json().get("items", [])
     area = next((a for a in areas if a["name"] == data.area_nombre), None)
     if not area:
+        logger.warning(json.dumps({
+            "event": "rendimiento_helado_area_no_encontrada",
+            "usuario": data.usuario,
+            "area_nombre": data.area_nombre,
+        }))
         raise HTTPException(status_code=404, detail="Área no encontrada")
     area_id = area["id"]
     # paso 2: obtener movimientos de transformación
@@ -55,6 +87,12 @@ def rendimiento_helado(data: RendimientoHeladoRequest, http_client: HTTPClient) 
     )
     response_mov = http_client.request("GET", movimientos_url, headers=headers)
     if response_mov.status_code != 200:
+        logger.error(json.dumps({
+            "event": "rendimiento_helado_error_movimientos",
+            "usuario": data.usuario,
+            "status_code": response_mov.status_code,
+            "detalle": "No se pudieron obtener los movimientos",
+        }))
         raise HTTPException(status_code=500, detail="No se pudieron obtener los movimientos")
     movimientos = response_mov.json().get("items", [])
     entradas = [m for m in movimientos if m["operation"] == "ENTRY"]
@@ -82,6 +120,13 @@ def rendimiento_helado(data: RendimientoHeladoRequest, http_client: HTTPClient) 
             "rendimiento_ideal": rendimiento_ideal,
             "eficiencia_porcentual": eficiencia,
         })
+    # Log fin de cálculo
+    logger.info(json.dumps({
+        "event": "rendimiento_helado_fin",
+        "usuario": data.usuario,
+        "area_id": area["id"],
+        "num_registros": len(resultados),
+    }))
     return {
         "area_nombre": area["name"],
         "area_id": area["id"],
@@ -89,16 +134,41 @@ def rendimiento_helado(data: RendimientoHeladoRequest, http_client: HTTPClient) 
     }
 
 
+@log_call
 def rendimiento_yogurt(data: RendimientoYogurtRequest, http_client: HTTPClient) -> RendimientoYogurtResponse:
     ctx = get_user_context(data.usuario)
     if not ctx:
+        logger.warning(json.dumps({
+            "event": "rendimiento_yogurt_sin_sesion",
+            "usuario": data.usuario,
+            "detalle": "Usuario no autenticado",
+        }))
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+    # Log inicio del cálculo de rendimiento de yogurt
+    try:
+        logger.info(json.dumps({
+            "event": "rendimiento_yogurt_inicio",
+            "usuario": data.usuario,
+            "region": ctx.get("region"),
+            "businessId": ctx.get("businessId"),
+            "area_nombre": data.area_nombre,
+            "fecha_inicio": str(data.fecha_inicio),
+            "fecha_fin": str(data.fecha_fin),
+        }))
+    except Exception:
+        pass
     # obtener ID de área
     areas_url = f"{base_url}/api/v1/administration/area?page=1&type=STOCK"
     res_areas = http_client.request("GET", areas_url, headers=headers)
     if res_areas.status_code != 200:
+        logger.error(json.dumps({
+            "event": "rendimiento_yogurt_error_areas",
+            "usuario": data.usuario,
+            "status_code": res_areas.status_code,
+            "detalle": "Error consultando áreas",
+        }))
         raise HTTPException(status_code=500, detail="Error consultando áreas")
     area_id = None
     for area in res_areas.json().get("items", []):
@@ -106,6 +176,11 @@ def rendimiento_yogurt(data: RendimientoYogurtRequest, http_client: HTTPClient) 
             area_id = area["id"]
             break
     if not area_id:
+        logger.warning(json.dumps({
+            "event": "rendimiento_yogurt_area_no_encontrada",
+            "usuario": data.usuario,
+            "area_nombre": data.area_nombre,
+        }))
         raise HTTPException(status_code=404, detail="Área no encontrada")
     # consultar movimientos
     movimientos_url = (
@@ -114,6 +189,12 @@ def rendimiento_yogurt(data: RendimientoYogurtRequest, http_client: HTTPClient) 
     )
     res_movs = http_client.request("GET", movimientos_url, headers=headers)
     if res_movs.status_code != 200:
+        logger.error(json.dumps({
+            "event": "rendimiento_yogurt_error_movimientos",
+            "usuario": data.usuario,
+            "status_code": res_movs.status_code,
+            "detalle": "Error consultando movimientos",
+        }))
         raise HTTPException(status_code=500, detail="Error consultando movimientos")
     movimientos = res_movs.json().get("items", [])
     producciones: List[RendimientoYogurtResumen] = []
@@ -139,4 +220,11 @@ def rendimiento_yogurt(data: RendimientoYogurtRequest, http_client: HTTPClient) 
                             eficiencia_porcentual=eficiencia,
                         )
                     )
+    # Log fin del cálculo
+    logger.info(json.dumps({
+        "event": "rendimiento_yogurt_fin",
+        "usuario": data.usuario,
+        "area_id": area_id,
+        "num_registros": len(producciones),
+    }))
     return RendimientoYogurtResponse(area_nombre=data.area_nombre, area_id=area_id, resumen=producciones)

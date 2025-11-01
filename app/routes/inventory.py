@@ -17,6 +17,10 @@ import csv
 from hashlib import sha1
 from fastapi import Query
 from fastapi import APIRouter, HTTPException
+
+# Logging utilities
+from app.logging_config import logger, log_call
+import json
 from app.core.http_sync import teco_request
 
 # Helpers y modelos del proyecto
@@ -232,8 +236,17 @@ def _digest_page(items: List[dict]) -> Optional[str]:
 # =========================
 
 @router.get("/listar-areas")
+@log_call
 def listar_areas(usuario: str):
-    """Return a list of stock areas for the current business."""
+    """Return a list of stock areas for the current business and log the operation."""
+    # Log inicio
+    try:
+        logger.info(json.dumps({
+            "event": "listar_areas_request",
+            "usuario": usuario,
+        }))
+    except Exception:
+        pass
     ctx = user_context.get(usuario)
     if not ctx:
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
@@ -245,18 +258,35 @@ def listar_areas(usuario: str):
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code, detail="Error al obtener las áreas")
     items = response.json().get("items", [])
-    return [{"id": a["id"], "nombre": a["name"]} for a in items]
+    result = [{"id": a["id"], "nombre": a["name"]} for a in items]
+    try:
+        logger.info(json.dumps({
+            "event": "listar_areas_response",
+            "usuario": usuario,
+            "num_areas": len(result),
+        }))
+    except Exception:
+        pass
+    return result
 
 
 @router.post("/rendimiento-helado")
+@log_call
 def rendimiento_helado(data: models.RendimientoHeladoRequest):
-    """Calculate efficiency metrics for ice cream production."""
+    """Calculate efficiency metrics for ice cream production and log the operation."""
+    try:
+        logger.info(json.dumps({
+            "event": "inventario_rendimiento_helado_request",
+            "usuario": data.usuario,
+            "area_nombre": data.area_nombre,
+        }))
+    except Exception:
+        pass
     ctx = user_context.get(data.usuario)
     if not ctx:
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
-
     # Get area by name
     url_areas = f"{base_url}/api/v1/administration/area?page=1&type=STOCK"
     response_areas = teco_request("GET", url_areas, headers=headers)
@@ -267,7 +297,6 @@ def rendimiento_helado(data: models.RendimientoHeladoRequest):
     if not area:
         raise HTTPException(status_code=404, detail="Área no encontrada")
     area_id = area["id"]
-
     movimientos_url = (
         f"{base_url}/api/v1/administration/movement?areaId={area_id}&all_data=true"
         f"&dateFrom={data.fecha_inicio}&dateTo={data.fecha_fin}&category=TRANSFORMATION"
@@ -276,10 +305,8 @@ def rendimiento_helado(data: models.RendimientoHeladoRequest):
     if response_mov.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron obtener los movimientos")
     movimientos = response_mov.json().get("items", [])
-
     entradas = [m for m in movimientos if m["operation"] == "ENTRY"]
     salidas = [m for m in movimientos if m["operation"] == "OUT"]
-
     resultados: List[Dict[str, object]] = []
     for salida in salidas:
         nombre_mezcla = salida["product"]["name"]
@@ -288,15 +315,12 @@ def rendimiento_helado(data: models.RendimientoHeladoRequest):
         entrada = next((e for e in entradas if e.get("parentId") == salida["id"]), None)
         if not entrada:
             continue
-
         sabor = extraer_sabor(nombre_mezcla)
         cantidad_mezcla = abs(salida["quantity"])
         cantidad_producida = entrada["quantity"]
-
         rendimiento_real = round(cantidad_producida / cantidad_mezcla, 4) if cantidad_mezcla else 0
         rendimiento_ideal = 2  # helado
         eficiencia = round((rendimiento_real / rendimiento_ideal) * 100, 2)
-
         resultados.append(
             {
                 "tipo": "Helado",
@@ -308,23 +332,39 @@ def rendimiento_helado(data: models.RendimientoHeladoRequest):
                 "eficiencia_porcentual": eficiencia,
             }
         )
-
-    return {
+    salida_resp = {
         "area_nombre": area["name"],
         "area_id": area["id"],
         "resumen": resultados,
     }
+    try:
+        logger.info(json.dumps({
+            "event": "inventario_rendimiento_helado_response",
+            "usuario": data.usuario,
+            "num_resultados": len(resultados),
+        }))
+    except Exception:
+        pass
+    return salida_resp
 
 
 @router.post("/rendimiento-yogurt", response_model=models.RendimientoYogurtResponse)
+@log_call
 def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
-    """Calculate efficiency metrics for yogurt production."""
+    """Calculate efficiency metrics for yogurt production and log the operation."""
+    try:
+        logger.info(json.dumps({
+            "event": "inventario_rendimiento_yogurt_request",
+            "usuario": data.usuario,
+            "area_nombre": data.area_nombre,
+        }))
+    except Exception:
+        pass
     ctx = user_context.get(data.usuario)
     if not ctx:
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
-
     areas_url = f"{base_url}/api/v1/administration/area?page=1&type=STOCK"
     res_areas = teco_request("GET", areas_url, headers=headers)
     if res_areas.status_code != 200:
@@ -334,7 +374,6 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
     if not area:
         raise HTTPException(status_code=404, detail="Área no encontrada")
     area_id = area["id"]
-
     movimientos_url = (
         f"{base_url}/api/v1/administration/movement?areaId={area_id}&all_data=true"
         f"&dateFrom={data.fecha_inicio}&dateTo={data.fecha_fin}&category=TRANSFORMATION"
@@ -343,10 +382,8 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
     if response_mov.status_code != 200:
         raise HTTPException(status_code=500, detail="No se pudieron obtener los movimientos")
     movimientos = response_mov.json().get("items", [])
-
     entradas = [m for m in movimientos if m["operation"] == "ENTRY"]
     salidas = [m for m in movimientos if m["operation"] == "OUT"]
-
     resultados: List[models.RendimientoYogurtResumen] = []
     for salida in salidas:
         nombre_mezcla = salida["product"]["name"]
@@ -355,15 +392,12 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
         entrada = next((e for e in entradas if e.get("parentId") == salida["id"]), None)
         if not entrada:
             continue
-
         sabor = extraer_sabor(nombre_mezcla)
         mezcla_usada = abs(salida["quantity"])
         produccion = entrada["quantity"]
-
         rendimiento_real = round(produccion / mezcla_usada, 4) if mezcla_usada else 0
         rendimiento_ideal = 2  # yogurt base 1.0 en pautas antiguas; se mantiene 2 si así quedó tu estándar
         eficiencia = round((rendimiento_real / rendimiento_ideal) * 100, 2)
-
         resultados.append(
             models.RendimientoYogurtResumen(
                 tipo="Yogurt",
@@ -375,12 +409,20 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
                 eficiencia_porcentual=eficiencia,
             )
         )
-
-    return models.RendimientoYogurtResponse(
+    respuesta = models.RendimientoYogurtResponse(
         area_nombre=area["name"],
         area_id=area["id"],
         resumen=resultados,
     )
+    try:
+        logger.info(json.dumps({
+            "event": "inventario_rendimiento_yogurt_response",
+            "usuario": data.usuario,
+            "num_resultados": len(resultados),
+        }))
+    except Exception:
+        pass
+    return respuesta
 
 
 # =========================
@@ -388,6 +430,7 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
 # =========================
 
 @router.get("/totalizar-inventario")
+@log_call
 def totalizar_inventario(
     usuario: str,
     # Control de envío por correo
@@ -399,60 +442,56 @@ def totalizar_inventario(
     max_items_json: int = Query(500, ge=0, le=10000, description="Máximo de productos a incluir en el JSON si incluir_productos=true."),
 ):
     """
-    Respuesta mínima por PRODUCTO:
-      - productos[]: [{ productName, disponibility, total_cost }]  (opcional en JSON)
-      - resumen: { items, disponibilidad_total, costo_total }      (siempre)
-    Reglas:
-      - PDF/Excel enviados por correo NO incluyen costos (solo cantidades generales).
-      - Para evitar 'response too large', por defecto el JSON NO incluye productos.
-        Usa ?incluir_productos=true&max_items_json=N para incluir hasta N filas.
+    Calcula el total de inventario y opcionalmente envía el resultado por correo. Registra eventos de inicio y finalización.
     """
+    # Log inicio
+    try:
+        logger.info(json.dumps({
+            "event": "inventario_totalizar_request",
+            "usuario": usuario,
+            "enviar_por_correo": enviar_por_correo,
+            "destinatario": bool(destinatario),
+            "formato": formato,
+            "incluir_productos": incluir_productos,
+            "max_items_json": max_items_json,
+        }))
+    except Exception:
+        pass
     # 1) Autenticación + headers
     ctx = user_context.get(usuario)
     if not ctx:
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = get_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
-
     url = f"{base_url}/api/v1/report/stock/disponibility"
-
     productos: List[Dict[str, Any]] = []
-
     # 2) Paginación segura
     page = 1
     last_digest: Optional[str] = None
     MAX_PAGES = 1000
-
     total_items_contados = 0
     suma_disponibilidad = 0.0
     suma_total_cost = 0.0
-
     while page <= MAX_PAGES:
         try:
             resp = teco_request("GET", url, headers=headers, params={"page": page})
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Error de red: {e}")
-
         if not (200 <= resp.status_code < 300):
             raise HTTPException(status_code=resp.status_code, detail=resp.text or f"Error en página {page}")
-
         js = resp.json()
-
         # Soporta estructura con { result: [...] }
         rows = js["result"] if isinstance(js, dict) and isinstance(js.get("result"), list) else _first_list_of_dicts(js)
         if not rows:
             break
-
         # Anti-loop: cortar si el backend ignora ?page=
         dig = sha1(repr(rows[:50]).encode("utf-8", "ignore")).hexdigest()
         if last_digest is not None and dig == last_digest:
             break
         last_digest = dig
-
         # 3) Normalizar SOLO los 3 campos pedidos (por PRODUCTO)
         for r in rows:
             name = r.get("productName") or r.get("name") or r.get("universalCode") or r.get("productId") or "SIN_NOMBRE"
-
             # cantidad: preferimos 'disponibility'; si falta, sumamos stocks[].quantity
             disp = r.get("disponibility", None)
             if disp is None:
@@ -464,16 +503,13 @@ def totalizar_inventario(
             disp = _safe_float(disp)
             if abs(disp) < ZERO_EPS:
                 disp = 0.0
-
             # total_cost (para JSON; nunca se imprime en PDF/Excel)
             tcost = _safe_float(r.get("total_cost", 0))
-
             # Guardar solo productos con disponibilidad > 0 real
             if disp > ZERO_EPS:
                 total_items_contados += 1
                 suma_disponibilidad += disp
                 suma_total_cost += tcost
-
                 # Solo acumulamos en la lista si luego el JSON lo va a devolver
                 if incluir_productos and len(productos) < max_items_json:
                     productos.append({
@@ -537,6 +573,19 @@ def totalizar_inventario(
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"No se pudo enviar el correo: {e}")
 
+    # Registrar finalización del proceso
+    try:
+        logger.info(json.dumps({
+            "event": "inventario_totalizar_response",
+            "usuario": usuario,
+            "items": total_items_contados,
+            "disponibilidad_total": round(suma_disponibilidad, 6),
+            "costo_total": round(suma_total_cost, 6),
+            "correo_enviado": enviar_por_correo,
+            "destinatario": destinatario if enviar_por_correo else None,
+        }))
+    except Exception:
+        pass
     return payload
 
 def _recopilar_productos_completos(usuario: str) -> List[Dict[str, Any]]:

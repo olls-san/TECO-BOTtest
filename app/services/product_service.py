@@ -15,6 +15,8 @@ from typing import Dict, Any, List, Optional, Tuple, Literal
 from fastapi import HTTPException
 
 from app.core.auth import get_base_url, build_auth_headers
+from app.logging_config import logger, log_call
+import json
 from app.core.context import get_user_context
 from app.clients.http_client import HTTPClient
 from app.schemas.products import Producto, ProductoEntradaInteligente, EntradaInteligenteRequest
@@ -177,13 +179,31 @@ def crear_o_buscar_producto(producto: ProductoEntradaInteligente, base_url: str,
         raise HTTPException(status_code=500, detail=f"No se pudo crear '{producto.nombre}'")
     return crear_res.json().get("id")
 
+@log_call
 def crear_producto_con_categoria(data: Producto, http_client: HTTPClient) -> Dict[str, Any]:
     """Create a new product under a specific or inferred category."""
     ctx = get_user_context(data.usuario)
     if not ctx:
+        logger.warning(json.dumps({
+            "event": "crear_producto_sin_sesion",
+            "usuario": data.usuario,
+            "detalle": "Usuario no autenticado",
+        }))
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+    # Log entrada de creación de producto
+    try:
+        logger.info(json.dumps({
+            "event": "crear_producto_inicio",
+            "usuario": data.usuario,
+            "region": ctx.get("region"),
+            "businessId": ctx.get("businessId"),
+            "nombre": data.nombre,
+            "categorias": data.categorias,
+        }))
+    except Exception:
+        pass
 
     # Acepta tipo humano o enum y lo normaliza (default STOCK)
     tipo = coerce_tipo(getattr(data, "tipo", None) or "STOCK", default_="STOCK")
@@ -203,9 +223,30 @@ def crear_producto_con_categoria(data: Producto, http_client: HTTPClient) -> Dic
         "images": [],
         "salesCategoryId": categoria_id,
     }
-    crear_res = http_client.request("POST", crear_url, headers=headers, json=crear_payload)
+    try:
+        crear_res = http_client.request("POST", crear_url, headers=headers, json=crear_payload)
+    except Exception as e:
+        logger.error(json.dumps({
+            "event": "crear_producto_error",
+            "usuario": data.usuario,
+            "detalle": str(e),
+        }), exc_info=True)
+        raise
     if crear_res.status_code not in [200, 201]:
+        logger.error(json.dumps({
+            "event": "crear_producto_error",
+            "usuario": data.usuario,
+            "status_code": crear_res.status_code,
+            "detalle": crear_res.text,
+        }))
         raise HTTPException(status_code=500, detail="No se pudo crear el producto")
+    # Log éxito
+    logger.info(json.dumps({
+        "event": "crear_producto_exito",
+        "usuario": data.usuario,
+        "product_id": crear_res.json().get("id"),
+        "nombre": data.nombre,
+    }))
     return {
         "status": "ok",
         "mensaje": f"Producto '{data.nombre}' creado en categoría '{categoria_nombre}'",
@@ -216,20 +257,49 @@ def crear_producto_con_categoria(data: Producto, http_client: HTTPClient) -> Dic
 # Entrada Inteligente
 # =======================
 
+@log_call
 def entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient) -> Dict[str, Any]:
     """Process an intelligent stock entry (bulk entry)."""
     ctx = get_user_context(data.usuario)
     if not ctx:
+        logger.warning(json.dumps({
+            "event": "entrada_inteligente_sin_sesion",
+            "usuario": data.usuario,
+            "detalle": "Usuario no autenticado",
+        }))
         raise HTTPException(status_code=403, detail="Usuario no autenticado")
     base_url = get_base_url(ctx["region"])
     headers = build_auth_headers(ctx["token"], ctx["businessId"], ctx["region"])
+    # Log inicio de entrada inteligente
+    try:
+        logger.info(json.dumps({
+            "event": "entrada_inteligente_inicio",
+            "usuario": data.usuario,
+            "region": ctx.get("region"),
+            "businessId": ctx.get("businessId"),
+            "stockAreaId": data.stockAreaId,
+            "numero_productos": len(data.productos) if data.productos else 0,
+        }))
+    except Exception:
+        pass
     # If no stockAreaId provided, list available warehouses
     if not data.stockAreaId:
         almacenes_url = f"{base_url}/api/v1/administration/area?type=STOCK"
         res = http_client.request("GET", almacenes_url, headers=headers)
         if res.status_code != 200:
+            logger.error(json.dumps({
+                "event": "entrada_inteligente_error",
+                "usuario": data.usuario,
+                "detalle": "No se pudieron obtener los almacenes",
+            }))
             raise HTTPException(status_code=500, detail="No se pudieron obtener los almacenes")
         almacenes = res.json().get("items", [])
+        logger.info(json.dumps({
+            "event": "entrada_inteligente_seleccion_area",
+            "usuario": data.usuario,
+            "mensaje": "Seleccione un área de stock",
+            "num_almacenes": len(almacenes),
+        }))
         return {
             "status": "ok",
             "mensaje": "Seleccione un área de stock",
@@ -237,7 +307,16 @@ def entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient
         }
     procesados: List[str] = []
     for prod in data.productos:
-        producto_id = crear_o_buscar_producto(prod, base_url, headers, http_client)
+        try:
+            producto_id = crear_o_buscar_producto(prod, base_url, headers, http_client)
+        except Exception as e:
+            logger.error(json.dumps({
+                "event": "entrada_inteligente_error_crear_buscar",
+                "usuario": data.usuario,
+                "producto": prod.nombre,
+                "detalle": str(e),
+            }), exc_info=True)
+            raise
         entrada_url = f"{base_url}/api/v1/administration/movement/bulk/entry"
         entrada_payload = {
             "products": [
@@ -246,10 +325,37 @@ def entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient
             "stockAreaId": data.stockAreaId,
             "continue": False,
         }
-        entrada_res = http_client.request("POST", entrada_url, headers=headers, json=entrada_payload)
+        try:
+            entrada_res = http_client.request("POST", entrada_url, headers=headers, json=entrada_payload)
+        except Exception as e:
+            logger.error(json.dumps({
+                "event": "entrada_inteligente_error_http",
+                "usuario": data.usuario,
+                "producto": prod.nombre,
+                "detalle": str(e),
+            }), exc_info=True)
+            raise
         if entrada_res.status_code not in [200, 201]:
+            logger.error(json.dumps({
+                "event": "entrada_inteligente_error",
+                "usuario": data.usuario,
+                "producto": prod.nombre,
+                "status_code": entrada_res.status_code,
+                "detalle": entrada_res.text,
+            }))
             raise HTTPException(status_code=500, detail=f"No se pudo dar entrada a '{prod.nombre}'")
         procesados.append(prod.nombre)
+        logger.info(json.dumps({
+            "event": "entrada_inteligente_producto_procesado",
+            "usuario": data.usuario,
+            "producto": prod.nombre,
+            "cantidad": prod.cantidad,
+        }))
+    logger.info(json.dumps({
+        "event": "entrada_inteligente_fin",
+        "usuario": data.usuario,
+        "procesados": len(procesados),
+    }))
     return {
         "status": "ok",
         "mensaje": "Productos procesados correctamente",
@@ -260,6 +366,7 @@ def entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient
 # Áreas MANUFACTURER (listar + resolver por nombre)
 # =========================================================
 
+@log_call
 def listar_areas_manufacturer(usuario: str, http_client: HTTPClient) -> List[Dict[str, Any]]:
     """
     Lista TODAS las áreas de tipo MANUFACTURER con paginación explícita.
@@ -285,6 +392,9 @@ def listar_areas_manufacturer(usuario: str, http_client: HTTPClient) -> List[Dic
         page += 1
     return items
 
+# Decorate resolver_area_ids_por_nombre with log_call to trace execution
+
+@log_call
 def resolver_area_ids_por_nombre(usuario: str, nombres: List[str], http_client: HTTPClient) -> List[int]:
     """
     Convierte nombres → IDs (match exacto case-insensitive).
@@ -444,6 +554,7 @@ def crear_producto_teco(usuario: str, data: Dict[str, Any], http_client: HTTPCli
         "type": str(body.get("type") or tipo),
     }
 
+@log_call
 def crear_productos_teco_batch(usuario: str, items: List[Dict[str, Any]], http_client: HTTPClient) -> Dict[str, Any]:
     """
     Batch **cliente**: itera la lista y crea cada producto de forma secuencial.

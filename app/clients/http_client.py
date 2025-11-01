@@ -22,8 +22,15 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, Optional
 import httpx
+import time
+import json
 
 from app.core.config import get_settings
+
+# Import logging helpers.  These functions allow us to record
+# outbound HTTP requests at DEBUG level with sensitive headers
+# stripped.  See ``app/logging_config.py`` for details.
+from app.logging_config import log_http_request, logger
 
 
 class CircuitBreaker:
@@ -95,6 +102,15 @@ class HTTPClient:
         propagating to FastAPI.
         """
         host = httpx.URL(url).host
+        # Log outbound request at debug level.  We remove sensitive
+        # headers (Authorization and x-app-businessid) in
+        # ``log_http_request``.  Params or JSON payload are passed if
+        # present.  We do not record tokens.
+        headers_for_log = kwargs.get("headers") or {}
+        params_for_log = kwargs.get("params")
+        json_body_for_log = kwargs.get("json")
+        log_http_request(method.upper(), url, headers=headers_for_log, params=params_for_log, json_body=json_body_for_log)
+        start_ts = time.time()
         if not self._breaker.can_request(host):
             raise RuntimeError(f"Circuit breaker open for host {host}")
         try:
@@ -102,7 +118,24 @@ class HTTPClient:
         except Exception as exc:
             # network or other error
             self._breaker.record_failure(host)
+            # log exception as error with stack trace
+            logger.error(json.dumps({
+                "event": "http_error",
+                "method": method.upper(),
+                "url": url,
+                "detail": str(exc),
+            }), exc_info=True)
             raise
+        finally:
+            # Always log the end of the HTTP request with status and duration
+            duration_ms = (time.time() - start_ts) * 1000
+            status = None
+            try:
+                status = response.status_code  # type: ignore[assignment]
+            except Exception:
+                status = None
+            log_http_request(method.upper(), url, headers=headers_for_log, params=params_for_log, json_body=json_body_for_log, status=status, duration_ms=duration_ms)
+        # record failures or reset circuit breaker based on status
         if response.is_error:
             # mark failure for 5xx errors only; 4xx considered client error
             if 500 <= response.status_code < 600:

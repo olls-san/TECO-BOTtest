@@ -14,6 +14,8 @@ from httpx import Client
 # 🧩 Dependencias del proyecto (ya existentes en tu base)
 from app.core.context import get_user_context
 from app.utils import normalizar_rango
+from app.logging_config import logger, log_call
+import json
 from app.core.http_sync import get_http_client  # inyección requerida (sin paréntesis)
 from app.clients.rendimiento_descomposicion_client import RendimientoDescomposicionClient
 
@@ -238,6 +240,7 @@ def _stats(values: List[float]) -> Tuple[Optional[float], Optional[float], Optio
 # SERVICE
 # ==============================================================================
 
+@log_call
 def rendimiento_descomposicion_service(
     *,
     body: Dict[str, Any],

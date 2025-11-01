@@ -13,6 +13,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from app.clients.http_client import HTTPClient
+from app.logging_config import log_call, logger
+import json
 from app.schemas.auth import LoginData, SeleccionNegocio
 from app.services.auth_service import login_user, seleccionar_negocio
 
@@ -28,11 +30,13 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/login-tecopos")
+@log_call
 def login_tecopos(data: LoginData, http_client: HTTPClient = Depends(get_http_client)):
     return login_user(data, http_client)
 
 
 @router.post("/seleccionar-negocio")
+@log_call
 def post_seleccionar_negocio(data: SeleccionNegocio, http_client: HTTPClient = Depends(get_http_client)):
     return seleccionar_negocio(data, http_client)
 

@@ -18,6 +18,8 @@ from fastapi import HTTPException
 from app.core.context import get_user_context
 from app.core.auth import get_base_url, build_auth_headers
 from app.clients.http_client import HTTPClient
+from app.logging_config import logger, log_call
+import json
 from app.schemas.carga import (
     CrearCargaConProductosRequest,
     ProductoCarga,
@@ -70,6 +72,7 @@ def crear_producto(ctx: Dict[str, Any], producto: ProductoCarga, categoria_id: i
     return r.json()["id"]
 
 
+@log_call
 def crear_carga_con_productos(data: CrearCargaConProductosRequest, http_client: HTTPClient) -> Dict[str, Any]:
     ctx = get_user_context(data.usuario)
     if not ctx:
@@ -143,6 +146,7 @@ def registrar_producto_en_carga(ctx: Dict[str, Any], carga_id: int, product_id: 
         raise Exception(f"Error al registrar '{getattr(prod, 'name', 'Desconocido')}': {response.status_code} - {response.text}")
 
 
+@log_call
 def entrada_productos_en_carga(data: EntradaProductosEnCargaRequest, http_client: HTTPClient) -> Dict[str, Any]:
     ctx = get_user_context(data.usuario)
     if not ctx:
@@ -175,6 +179,7 @@ def entrada_productos_en_carga(data: EntradaProductosEnCargaRequest, http_client
     }
 
 
+@log_call
 def listar_cargas_disponibles(usuario: str, http_client: HTTPClient) -> Dict[str, Any]:
     ctx = get_user_context(usuario)
     if not ctx:

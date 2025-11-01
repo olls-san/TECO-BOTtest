@@ -19,6 +19,8 @@ from fastapi import HTTPException
 from app.core.context import get_user_context
 from app.core.auth import get_base_url, build_auth_headers
 from app.clients.http_client import HTTPClient
+from app.logging_config import logger, log_call
+import json
 from app.schemas.reports import (
     QuiebreRequest,
     ReporteVentasRequest,
@@ -30,6 +32,7 @@ from app.schemas.reports import (
 from collections import defaultdict
 
 
+@log_call
 def reporte_ventas(data: ReporteVentasRequest, http_client: HTTPClient) -> Dict[str, Any]:
     """Retrieve a detailed sales report for a date range.
 
@@ -78,6 +81,7 @@ def reporte_ventas(data: ReporteVentasRequest, http_client: HTTPClient) -> Dict[
     }
 
 
+@log_call
 def reporte_quiebre_stock(request: QuiebreRequest, http_client: HTTPClient) -> Dict[str, Any]:
     """Perform stock break analysis based on sales performance.
 
@@ -152,6 +156,7 @@ def reporte_quiebre_stock(request: QuiebreRequest, http_client: HTTPClient) -> D
         }
 
 
+@log_call
 def analizar_desempeno_ventas(productos: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Compute summary statistics and top performers from sales data."""
     if not productos:
@@ -189,6 +194,7 @@ def analizar_desempeno_ventas(productos: List[Dict[str, Any]]) -> Dict[str, Any]
     }
 
 
+@log_call
 def analisis_desempeno(data: AnalisisDesempenoRequest, http_client: HTTPClient) -> Dict[str, Any]:
     """Perform a sales performance analysis over a date range."""
     ctx = get_user_context(data.usuario)
@@ -260,6 +266,7 @@ TIPOS_NEGOCIO: Dict[str, Dict[str, Any]] = {
 }
 
 
+@log_call
 def obtener_tipos_negocio() -> Dict[str, Any]:
     """Return the configured business types and their recommendation metadata."""
     return {
@@ -307,6 +314,7 @@ def aplicar_modelo_proyeccion(ventas_diarias: List[Dict[str, Any]], modelo: str)
     return proyecciones
 
 
+@log_call
 def enriquecer_proyeccion_con_nombres(usuario: str, proyeccion: List[Dict[str, Any]], http_client: HTTPClient) -> List[Dict[str, Any]]:
     """Enhance projections with product names by fetching product pages."""
     ctx = get_user_context(usuario)
@@ -331,6 +339,7 @@ def enriquecer_proyeccion_con_nombres(usuario: str, proyeccion: List[Dict[str, A
     return proyeccion
 
 
+@log_call
 def ventas_diarias(data: Dict[str, Any], http_client: HTTPClient) -> Dict[str, Any]:
     """Retrieve daily sales for each day within a date range."""
     usuario = data.get("usuario")
@@ -374,6 +383,7 @@ def ventas_diarias(data: Dict[str, Any], http_client: HTTPClient) -> Dict[str, A
     }
 
 
+@log_call
 def proyeccion_ventas(usuario: str, tipo_negocio: str, fecha_base: str | None, http_client: HTTPClient) -> Dict[str, Any]:
     """Calculate sales projections based on historical data and business type."""
     if tipo_negocio not in TIPOS_NEGOCIO:
@@ -490,6 +500,7 @@ def reporte_ventas_global(data: ReporteGlobalRequest, http_client: HTTPClient) -
     }
 
 
+@log_call
 def comparativa_semanal(usuario: str, fecha_inicio: str, semanas: int, http_client: HTTPClient) -> Dict[str, Any]:
     """Compare daily sales across multiple weeks."""
     ctx = get_user_context(usuario)
@@ -533,6 +544,7 @@ def comparativa_semanal(usuario: str, fecha_inicio: str, semanas: int, http_clie
     }
 
 
+@log_call
 def ticket_promedio(data: RangoFechasConHora, http_client: HTTPClient) -> Dict[str, Dict[str, Any]]:
     """Calculate average ticket size per currency between two dates."""
     ctx = get_user_context(data.usuario)
