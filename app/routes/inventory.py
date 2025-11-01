@@ -19,7 +19,7 @@ from fastapi import Query
 from fastapi import APIRouter, HTTPException
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger; avoid decorator
 import json
 from app.core.http_sync import teco_request
 
@@ -236,7 +236,7 @@ def _digest_page(items: List[dict]) -> Optional[str]:
 # =========================
 
 @router.get("/listar-areas")
-@log_call
+
 def listar_areas(usuario: str):
     """Return a list of stock areas for the current business and log the operation."""
     # Log inicio
@@ -271,7 +271,7 @@ def listar_areas(usuario: str):
 
 
 @router.post("/rendimiento-helado")
-@log_call
+
 def rendimiento_helado(data: models.RendimientoHeladoRequest):
     """Calculate efficiency metrics for ice cream production and log the operation."""
     try:
@@ -349,7 +349,7 @@ def rendimiento_helado(data: models.RendimientoHeladoRequest):
 
 
 @router.post("/rendimiento-yogurt", response_model=models.RendimientoYogurtResponse)
-@log_call
+
 def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
     """Calculate efficiency metrics for yogurt production and log the operation."""
     try:
@@ -430,7 +430,7 @@ def rendimiento_yogurt(data: models.RendimientoYogurtRequest):
 # =========================
 
 @router.get("/totalizar-inventario")
-@log_call
+
 def totalizar_inventario(
     usuario: str,
     # Control de envío por correo

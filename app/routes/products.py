@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 # Logger y utilidades de logging
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import logger only; decorators removed
 import json
 
 from app.clients.http_client import HTTPClient
@@ -31,7 +31,6 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/crear-producto-con-categoria")
-@log_call
 def post_crear_producto_con_categoria(payload: dict, http_client: HTTPClient = Depends(get_http_client)):
     """
     Modo mixto:
@@ -104,7 +103,6 @@ def post_crear_producto_con_categoria(payload: dict, http_client: HTTPClient = D
 
 
 @router.post("/entrada-inteligente")
-@log_call
 def post_entrada_inteligente(data: EntradaInteligenteRequest, http_client: HTTPClient = Depends(get_http_client)):
     """
     Endpoint para procesar una entrada inteligente de productos en stock.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger
 import json
 from app.schemas.rendimiento_descomposicion import (
     RendimientoDescomposicionBody,
@@ -15,7 +15,7 @@ router = APIRouter()
 
 
 @router.post("/rendimientoDescomposicion")
-@log_call
+
 def rendimiento_descomposicion_post(
     payload: RendimientoDescomposicionBody,
 ) -> RendimientoDescomposicionResponse:

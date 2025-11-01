@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from app.clients.http_client import HTTPClient
-from app.logging_config import log_call, logger
+from app.logging_config import logger  # import logger for explicit logging; decorators removed
 import json
 from app.schemas.auth import LoginData, SeleccionNegocio
 from app.services.auth_service import login_user, seleccionar_negocio
@@ -30,13 +30,30 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/login-tecopos")
-@log_call
 def login_tecopos(data: LoginData, http_client: HTTPClient = Depends(get_http_client)):
+    # Log entry into the endpoint
+    try:
+        logger.info(json.dumps({
+            "event": "login_tecopos_request",
+            "usuario": data.usuario,
+            "region": data.region,
+        }))
+    except Exception:
+        # Ensure logging does not break functionality
+        logger.info(json.dumps({"event": "login_tecopos_request"}))
     return login_user(data, http_client)
 
 
 @router.post("/seleccionar-negocio")
-@log_call
 def post_seleccionar_negocio(data: SeleccionNegocio, http_client: HTTPClient = Depends(get_http_client)):
+    # Log entry into the endpoint
+    try:
+        logger.info(json.dumps({
+            "event": "seleccionar_negocio_request",
+            "usuario": data.usuario,
+            "negocio": data.nombre_negocio,
+        }))
+    except Exception:
+        logger.info(json.dumps({"event": "seleccionar_negocio_request"}))
     return seleccionar_negocio(data, http_client)
 

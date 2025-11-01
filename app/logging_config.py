@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 from functools import wraps
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict
 
 # -----------------------------------------------------------------------------
 # Configure global logging
@@ -106,6 +106,14 @@ def log_call(func: Callable[..., Any]) -> Callable[..., Any]:
 
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        """Wrapper function that logs entry and exit of the wrapped callable.
+
+        The wrapper emits a ``call_start`` event prior to invoking the decorated
+        function and a ``call_end`` event afterwards.  All arguments and the
+        return value are passed through the ``_sanitize`` helper to strip
+        sensitive information.  Any errors during logging are silently
+        ignored so as not to impact application behaviour.
+        """
         try:
             args_repr = _sanitize(args)
             kwargs_repr = _sanitize(kwargs)
@@ -116,8 +124,9 @@ def log_call(func: Callable[..., Any]) -> Callable[..., Any]:
                 "kwargs": kwargs_repr,
             }))
         except Exception:
-            # If sanitisation fails don't block the call
+            # If sanitisation or logging fails, still proceed with the call
             logger.debug(json.dumps({"event": "call_start", "function": func.__name__}))
+        # Invoke the actual function
         result = func(*args, **kwargs)
         try:
             result_repr = _sanitize(result)
@@ -129,6 +138,23 @@ def log_call(func: Callable[..., Any]) -> Callable[..., Any]:
         except Exception:
             logger.debug(json.dumps({"event": "call_end", "function": func.__name__}))
         return result
+
+    # Copy the signature of the wrapped function so FastAPI and other
+    # introspection tools see the original parameters and annotations.
+    try:
+        import inspect  # imported here to avoid a global dependency
+        wrapper.__signature__ = inspect.signature(func)
+    except Exception:
+        pass
+
+    # Merge the global namespace of the wrapped function into the wrapper's
+    # globals.  Without this, annotations defined in the original module (e.g.
+    # Pydantic models like ``LoginData``) may not be resolvable when the
+    # wrapper is inspected by FastAPI.  See https://errors.pydantic.dev/2.8/u/undefined-annotation
+    try:
+        wrapper.__globals__.update(func.__globals__)
+    except Exception:
+        pass
 
     return wrapper
 

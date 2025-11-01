@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger
 import json
 from app.clients.http_client import HTTPClient
 from app.schemas.dispatch import ReplicarProductosRequest
@@ -28,7 +28,7 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/replicar-productos", summary="Replicar productos entre negocios mediante despacho Tecopos", tags=["Despachos"])
-@log_call
+
 def post_replicar_productos(data: ReplicarProductosRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Inicia la replicación de productos entre negocios mediante un despacho Tecopos."""
     try:

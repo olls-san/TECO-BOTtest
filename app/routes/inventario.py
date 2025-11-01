@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger
 import json
 from typing import Optional
 from app.clients.http_client import HTTPClient
@@ -26,7 +26,6 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.get("/totalizar-inventario")
-@log_call
 def get_totalizar_inventario(
     usuario: str,
     enviar_por_correo: bool = Query(False),

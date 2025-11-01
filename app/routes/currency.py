@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger
 import json
 from app.clients.http_client import HTTPClient
 from app.schemas.currency import CambioMonedaRequest
@@ -27,7 +27,6 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/actualizar-monedas")
-@log_call
 def post_actualizar_monedas(data: CambioMonedaRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Actualiza o simula la actualización de monedas de forma masiva."""
     try:

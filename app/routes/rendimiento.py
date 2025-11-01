@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger
 import json
 from app.clients.http_client import HTTPClient
 from app.schemas.rendimiento import (
@@ -31,7 +31,7 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/rendimiento-helado")
-@log_call
+
 def post_rendimiento_helado(data: RendimientoHeladoRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Calcula el rendimiento de producción de helado. Registra eventos de inicio y fin."""
     try:
@@ -60,7 +60,7 @@ def post_rendimiento_helado(data: RendimientoHeladoRequest, http_client: HTTPCli
 
 
 @router.post("/rendimiento-yogurt", response_model=RendimientoYogurtResponse)
-@log_call
+
 def post_rendimiento_yogurt(data: RendimientoYogurtRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Calcula el rendimiento de yogurt y registra eventos de inicio y fin."""
     try:

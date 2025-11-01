@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Body, Query, Request
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger
 import json
 from typing import Dict, Any
 
@@ -45,7 +45,7 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/reporte-ventas")
-@log_call
+
 def post_reporte_ventas(data: ReporteVentasRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Devuelve el reporte de ventas para un rango de fechas. Registra eventos de inicio y finalización."""
     try:
@@ -75,7 +75,7 @@ def post_reporte_ventas(data: ReporteVentasRequest, http_client: HTTPClient = De
 
 
 @router.post("/reporte-quiebre-stock")
-@log_call
+
 def post_reporte_quiebre_stock(request_body: QuiebreRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Realiza un análisis de quiebre de stock. Registra eventos de inicio y finalización."""
     try:
@@ -106,7 +106,7 @@ def post_reporte_quiebre_stock(request_body: QuiebreRequest, http_client: HTTPCl
 
 
 @router.post("/analisis-desempeno")
-@log_call
+
 def post_analisis_desempeno(data: AnalisisDesempenoRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Realiza un análisis de desempeño de ventas y registra eventos para observabilidad."""
     try:
@@ -136,7 +136,7 @@ def post_analisis_desempeno(data: AnalisisDesempenoRequest, http_client: HTTPCli
 
 
 @router.post("/ventas-diarias")
-@log_call
+
 def post_ventas_diarias(data: Dict[str, Any] = Body(...), http_client: HTTPClient = Depends(get_http_client)):
     """Obtiene ventas diarias para un rango de fechas. Registra eventos de inicio y fin."""
     usuario = data.get("usuario")
@@ -169,7 +169,7 @@ def post_ventas_diarias(data: Dict[str, Any] = Body(...), http_client: HTTPClien
 
 
 @router.get("/tipos-negocio")
-@log_call
+
 def get_tipos_negocio():
     """Devuelve la lista de tipos de negocio y registra evento."""
     try:
@@ -185,7 +185,7 @@ def get_tipos_negocio():
 
 
 @router.post("/proyeccion-ventas")
-@log_call
+
 def post_proyeccion_ventas(
     usuario: str = Body(...),
     tipo_negocio: str = Body(...),
@@ -220,7 +220,7 @@ def post_proyeccion_ventas(
 
 
 @router.post("/reporte-ventas-global")
-@log_call
+
 def post_reporte_ventas_global(data: ReporteGlobalRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Devuelve métricas de ventas globales consolidando todas las sucursales. Registra eventos."""
     try:
@@ -249,7 +249,7 @@ def post_reporte_ventas_global(data: ReporteGlobalRequest, http_client: HTTPClie
 
 
 @router.get("/comparativa-semanal")
-@log_call
+
 def get_comparativa_semanal(
     usuario: str = Query(..., description="Usuario registrado (clave en user_context)"),
     fecha_inicio: str = Query(..., description="Fecha inicial en formato YYYY-MM-DD"),
@@ -283,7 +283,7 @@ def get_comparativa_semanal(
 
 
 @router.post("/ticket-promedio", tags=["AnÃ¡lisis"], operation_id="calcular_ticket_promedio")
-@log_call
+
 def post_ticket_promedio(data: RangoFechasConHora = Body(...), http_client: HTTPClient = Depends(get_http_client)):
     """Calcula el ticket promedio entre dos fechas y registra eventos."""
     try:

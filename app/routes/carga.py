@@ -12,7 +12,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 # Logging utilities
-from app.logging_config import logger, log_call
+from app.logging_config import logger  # import only logger
 import json
 from app.clients.http_client import HTTPClient
 from app.schemas.carga import (
@@ -37,7 +37,6 @@ def get_http_client(request: Request) -> HTTPClient:
 
 
 @router.post("/crear-carga-con-productos")
-@log_call
 def post_crear_carga_con_productos(data: CrearCargaConProductosRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Crea una nueva carga con productos incluidos. Registra eventos de inicio y finalización."""
     try:
@@ -67,7 +66,6 @@ def post_crear_carga_con_productos(data: CrearCargaConProductosRequest, http_cli
 
 
 @router.post("/entrada-productos-en-carga")
-@log_call
 def post_entrada_productos_en_carga(data: EntradaProductosEnCargaRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Registra productos dentro de una carga existente. Registra eventos para trazabilidad."""
     try:
@@ -98,7 +96,7 @@ def post_entrada_productos_en_carga(data: EntradaProductosEnCargaRequest, http_c
 
 
 @router.get("/listar-cargas-disponibles")
-@log_call
+
 def get_listar_cargas_disponibles(usuario: str, http_client: HTTPClient = Depends(get_http_client)):
     """Lista cargas disponibles para el usuario y registra eventos de inicio y fin."""
     try:
@@ -126,7 +124,7 @@ def get_listar_cargas_disponibles(usuario: str, http_client: HTTPClient = Depend
 
 
 @router.post("/verificar-productos-existen", response_model=ProductosFaltantesResponse)
-@log_call
+
 def post_verificar_productos_existen(data: VerificarProductosRequest, http_client: HTTPClient = Depends(get_http_client)):
     """Verifica que una lista de productos exista en el sistema. Registra eventos clave."""
     try:
